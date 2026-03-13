@@ -6,6 +6,8 @@ Run once to create (or update) all Temporal schedules.
 Safe to re-run — will update existing schedules.
 
 Usage:
+    # From project root with Alfred's venv:
+    source ~/clawd/temporal-workflows/.venv/bin/activate
     python3 temporal/schedules.py
 """
 
@@ -17,11 +19,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from temporalio.client import Client, Schedule, ScheduleActionStartWorkflow
-from temporalio.client import ScheduleSpec, ScheduleCronSpec, ScheduleState
-from temporalio.common import RetryPolicy
+from temporalio.client import (
+    Client,
+    Schedule,
+    ScheduleActionStartWorkflow,
+    ScheduleSpec,
+    ScheduleState,
+    SchedulePolicy,
+    ScheduleOverlapPolicy,
+)
 
-from config import TEMPORAL_ADDRESS, TASK_QUEUE, DAILY_CRON, WEEKLY_CRON
+from config import TEMPORAL_ADDRESS, TASK_QUEUE
 from temporal.workflows import DailyIngestionWorkflow, WeeklyAnalysisWorkflow
 
 logging.basicConfig(level=logging.INFO)
@@ -30,19 +38,19 @@ logger = logging.getLogger(__name__)
 SCHEDULES = [
     {
         "id": "presence-daily-ingestion",
-        "cron": DAILY_CRON,         # 23:45 daily Budapest time
+        # 22:45 UTC = 23:45 Budapest (CET/UTC+1). In CEST (UTC+2): adjust manually.
+        "cron": "45 22 * * *",
         "workflow": DailyIngestionWorkflow,
-        "args": [],
+        "workflow_id": "presence-daily-ingestion-workflow",
         "description": "Daily presence data ingestion (WHOOP + Calendar + Slack)",
-        "timezone": "Europe/Budapest",
     },
     {
         "id": "presence-weekly-analysis",
-        "cron": WEEKLY_CRON,        # Sunday 21:00 Budapest time
+        # 20:00 UTC = 21:00 Budapest (CET). Sunday only.
+        "cron": "0 20 * * 0",
         "workflow": WeeklyAnalysisWorkflow,
-        "args": [],
+        "workflow_id": "presence-weekly-analysis-workflow",
         "description": "Weekly Alfred Intuition pattern analysis",
-        "timezone": "Europe/Budapest",
     },
 ]
 
@@ -50,23 +58,24 @@ SCHEDULES = [
 async def register_schedules():
     client = await Client.connect(TEMPORAL_ADDRESS)
 
-    for sched_config in SCHEDULES:
-        schedule_id = sched_config["id"]
-        logger.info(f"Registering schedule: {schedule_id}")
+    for cfg in SCHEDULES:
+        schedule_id = cfg["id"]
+        logger.info(f"Registering schedule: {schedule_id} ({cfg['cron']})")
 
         schedule = Schedule(
             action=ScheduleActionStartWorkflow(
-                sched_config["workflow"].run,
-                *sched_config["args"],
-                id=f"{schedule_id}-workflow",
+                cfg["workflow"].run,
+                id=cfg["workflow_id"],
                 task_queue=TASK_QUEUE,
             ),
             spec=ScheduleSpec(
-                cron_expressions=[sched_config["cron"]],
-                timezone=sched_config.get("timezone", "Europe/Budapest"),
+                cron_expressions=[cfg["cron"]],
             ),
             state=ScheduleState(
-                note=sched_config.get("description", ""),
+                note=cfg.get("description", ""),
+            ),
+            policy=SchedulePolicy(
+                overlap=ScheduleOverlapPolicy.SKIP,
             ),
         )
 
@@ -74,10 +83,10 @@ async def register_schedules():
             await client.create_schedule(schedule_id, schedule)
             logger.info(f"  Created: {schedule_id}")
         except Exception as e:
-            if "already exists" in str(e).lower() or "already registered" in str(e).lower():
-                # Update existing
+            err = str(e).lower()
+            if "already exists" in err or "already started" in err:
                 handle = client.get_schedule_handle(schedule_id)
-                await handle.update(lambda _: schedule)
+                await handle.update(lambda s, new=schedule: new)
                 logger.info(f"  Updated: {schedule_id}")
             else:
                 logger.error(f"  Failed to register {schedule_id}: {e}")
