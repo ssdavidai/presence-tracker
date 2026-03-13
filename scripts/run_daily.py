@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""
+Presence Tracker — Daily Ingestion Runner
+
+Usage:
+    python3 scripts/run_daily.py                  # Run for today
+    python3 scripts/run_daily.py 2026-03-13       # Run for a specific date
+    python3 scripts/run_daily.py --force           # Re-run even if data exists
+
+This script:
+1. Collects WHOOP data for the date
+2. Collects Google Calendar events
+3. Collects Slack activity
+4. Builds 96 × 15-min windows
+5. Computes derived metrics
+6. Writes YYYY-MM-DD.jsonl to data/chunks/
+7. Updates rolling summary stats
+8. Sends a digest to #alfred-logs
+"""
+
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from config import SLACK_LOGS_CHANNEL, GATEWAY_URL, GATEWAY_TOKEN
+from collectors import whoop, gcal, slack
+from engine.chunker import build_windows
+from engine.chunker import summarize_day as _summarize_day
+from engine.store import write_day, update_summary, day_exists
+
+import urllib.request
+
+
+def _slack_log(message: str) -> None:
+    """Send a message to #alfred-logs via gateway."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {GATEWAY_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = json.dumps({
+            "tool": "message",
+            "args": {
+                "action": "send",
+                "channel": "slack",
+                "target": SLACK_LOGS_CHANNEL,
+                "message": message,
+            }
+        }).encode()
+        req = urllib.request.Request(
+            f"{GATEWAY_URL}/tools/invoke",
+            data=payload,
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            pass
+    except Exception as e:
+        print(f"[slack-log] Warning: {e}", file=sys.stderr)
+
+
+def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
+    """
+    Run the full daily ingestion pipeline for a given date.
+
+    Returns the day summary dict.
+    Raises on critical failures.
+    """
+    if not quiet:
+        print(f"[presence] Running daily ingestion for {date_str}")
+
+    if day_exists(date_str) and not force:
+        if not quiet:
+            print(f"[presence] Data already exists for {date_str}, skipping (use --force to override)")
+        from engine.store import read_day
+        existing = read_day(date_str)
+        return _summarize_day(existing) if existing else {}
+
+    # ── Step 1: Collect WHOOP ─────────────────────────────────────────────
+    if not quiet:
+        print("[presence] Collecting WHOOP data...")
+    try:
+        whoop_data = whoop.collect(date_str)
+        if not quiet:
+            print(f"  Recovery: {whoop_data.get('recovery_score')}%  "
+                  f"HRV: {whoop_data.get('hrv_rmssd_milli')}ms  "
+                  f"Sleep: {whoop_data.get('sleep_hours')}h")
+    except Exception as e:
+        print(f"[presence] WHOOP collection failed: {e}", file=sys.stderr)
+        whoop_data = {}
+
+    # ── Step 2: Collect Calendar ──────────────────────────────────────────
+    if not quiet:
+        print("[presence] Collecting Calendar events...")
+    try:
+        calendar_data = gcal.collect(date_str)
+        if not quiet:
+            print(f"  Events: {calendar_data.get('event_count', 0)}  "
+                  f"Meeting time: {calendar_data.get('total_meeting_minutes', 0)} min")
+    except Exception as e:
+        print(f"[presence] Calendar collection failed: {e}", file=sys.stderr)
+        calendar_data = {"events": [], "event_count": 0, "total_meeting_minutes": 0, "max_concurrent_attendees": 0}
+
+    # ── Step 3: Collect Slack ─────────────────────────────────────────────
+    if not quiet:
+        print("[presence] Collecting Slack activity...")
+    try:
+        slack_windows = slack.collect(date_str)
+        total_msgs = sum(w.get("total_messages", 0) for w in slack_windows.values())
+        if not quiet:
+            print(f"  Total messages: {total_msgs}")
+    except Exception as e:
+        print(f"[presence] Slack collection failed: {e}", file=sys.stderr)
+        slack_windows = {}
+
+    # ── Step 4: Build windows ─────────────────────────────────────────────
+    if not quiet:
+        print("[presence] Building 15-minute windows...")
+    windows = build_windows(
+        date_str=date_str,
+        whoop_data=whoop_data,
+        calendar_data=calendar_data,
+        slack_windows=slack_windows,
+    )
+    if not quiet:
+        print(f"  Built {len(windows)} windows")
+
+    # ── Step 5: Compute summary ───────────────────────────────────────────
+    summary = _summarize_day(windows)
+
+    # ── Step 6: Write JSONL ───────────────────────────────────────────────
+    output_path = write_day(date_str, windows)
+    if not quiet:
+        print(f"[presence] Written to {output_path}")
+
+    # ── Step 7: Update rolling summary ───────────────────────────────────
+    update_summary(summary)
+
+    # ── Step 8: Log digest to Slack ───────────────────────────────────────
+    recovery = whoop_data.get("recovery_score")
+    hrv = whoop_data.get("hrv_rmssd_milli")
+    avg_cls = summary.get("metrics_avg", {}).get("cognitive_load_score")
+    avg_fdi = summary.get("metrics_avg", {}).get("focus_depth_index")
+    meeting_mins = summary.get("calendar", {}).get("total_meeting_minutes", 0)
+
+    log_msg = (
+        f"[PRESENCE] Daily ingestion complete — {date_str}\n"
+        f"Recovery: {recovery}% | HRV: {hrv}ms\n"
+        f"Avg CLS: {avg_cls:.2f} | Avg FDI: {avg_fdi:.2f}\n"
+        f"Meetings: {meeting_mins} min | Windows: {len(windows)}"
+    )
+    _slack_log(log_msg)
+
+    # Daily alert check
+    if recovery is not None and recovery < 50 and avg_cls and avg_cls > 0.70:
+        from analysis.intuition import run_daily_alert
+        run_daily_alert(summary)
+
+    if not quiet:
+        print(f"[presence] Done. Summary: {json.dumps(summary.get('metrics_avg', {}), indent=2)}")
+
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Presence Tracker — Daily Ingestion")
+    parser.add_argument("date", nargs="?", default=datetime.now().strftime("%Y-%m-%d"),
+                        help="Date to process (YYYY-MM-DD, default: today)")
+    parser.add_argument("--force", "-f", action="store_true",
+                        help="Re-run even if data already exists")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Suppress output (for cron)")
+    args = parser.parse_args()
+
+    try:
+        datetime.strptime(args.date, "%Y-%m-%d")
+    except ValueError:
+        print(f"Invalid date format: {args.date}. Use YYYY-MM-DD.", file=sys.stderr)
+        sys.exit(1)
+
+    summary = run(args.date, force=args.force, quiet=args.quiet)
+    print(json.dumps(summary, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    main()
