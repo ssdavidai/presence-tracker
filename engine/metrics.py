@@ -16,9 +16,37 @@ v1.1 — HRV-aware physiological composite:
   recovery_score was considered; low HRV (autonomic stress marker) and
   poor sleep now correctly raise the perceived cognitive load baseline
   and reduce the physiological capacity available for work.
+
+v1.2 — RescueTime integration:
+  When RescueTime data is available, CLS, FDI, and CSC are upgraded from
+  proxy-based to signal-based computation:
+
+  CLS: productivity_score replaces the recovery-inverse proxy for
+       application-level cognitive demand.  A distracted window (low
+       productivity_score) raises CLS even when WHOOP recovery is high.
+       Weight is blended: 0.25 RT signal + 0.75 existing formula so that
+       the metric degrades gracefully when RT is absent.
+
+  FDI: app_switches replaces the Slack-channels proxy for context switching.
+       Real app-switch counts from RescueTime are a direct measure of
+       fragmentation — far more precise than cross-channel Slack activity.
+
+  CSC: app_switches from RescueTime are added as a third component
+       alongside meeting switches and Slack channel switches, providing
+       a real behavioral signal for fragmentation cost.
+
+  All three functions accept optional rescuetime_data kwargs so existing
+  callers without RT data continue to work unchanged.
 """
 
 from typing import Optional
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+# Maximum RescueTime app switches per 15-min window before the signal saturates.
+# 8 switches = highly fragmented (switching apps roughly every 2 minutes).
+_MAX_RT_APP_SWITCHES = 8
+
 
 # ─── Normalization helpers ────────────────────────────────────────────────────
 
@@ -109,6 +137,8 @@ def cognitive_load_score(
     hrv_rmssd_milli: Optional[float] = None,
     sleep_performance: Optional[float] = None,
     window_duration_minutes: int = 15,
+    rt_productivity_score: Optional[float] = None,
+    rt_active_seconds: int = 0,
 ) -> float:
     """
     Cognitive Load Score — how mentally demanding was this window?
@@ -122,6 +152,14 @@ def cognitive_load_score(
         recovery_score: WHOOP recovery (0-100), None if unavailable
         hrv_rmssd_milli: HRV in ms (v1.1 — improves physiological baseline)
         sleep_performance: WHOOP sleep performance (0-100), optional
+        rt_productivity_score: RescueTime productivity score (0.0–1.0).
+            1.0 = very productive, 0.0 = very distracting.  When provided,
+            used as a direct behavioral signal for cognitive demand.
+            Low productivity_score → high distraction → higher CLS.
+            (v1.2 — replaces recovery_inverse as the behavioral demand proxy)
+        rt_active_seconds: total active computer time in this window (0–900).
+            Used to gate the RT signal: if the computer was idle, RT
+            distraction data is not meaningful.
     """
     # Component: meeting density
     # 1.0 if in a meeting, 0.0 if not
@@ -141,13 +179,29 @@ def cognitive_load_score(
     readiness = physiological_readiness(recovery_score, hrv_rmssd_milli, sleep_performance)
     recovery_inverse = 1.0 - readiness
 
-    # Weighted average
-    cls = (
+    # v1.2: RescueTime behavioral demand signal
+    # When the computer was actively used and RT data is available, blend in
+    # the distraction signal (1 - productivity_score) as a real behavioral
+    # measure of cognitive demand.
+    #
+    # Blend formula: CLS = 0.75 * base_cls + 0.25 * rt_demand
+    # This keeps the existing formula dominant while RT adds a meaningful nudge.
+    # rt_demand is only applied when the machine was active (>= 60s) to avoid
+    # zero-productivity scores for truly idle windows pulling CLS up.
+
+    base_cls = (
         0.35 * meeting_component +
         0.20 * calendar_pressure +
         0.25 * slack_component +
         0.20 * recovery_inverse
     )
+
+    if rt_productivity_score is not None and rt_active_seconds >= 60:
+        # Low productivity score = high distraction = higher demand
+        rt_demand = 1.0 - rt_productivity_score
+        cls = 0.75 * base_cls + 0.25 * rt_demand
+    else:
+        cls = base_cls
 
     return round(_clamp(cls), 4)
 
@@ -158,6 +212,9 @@ def focus_depth_index(
     in_meeting: bool,
     slack_messages_received: int,
     context_switches: int = 0,
+    rt_app_switches: Optional[int] = None,
+    rt_active_seconds: int = 0,
+    rt_productivity_score: Optional[float] = None,
 ) -> float:
     """
     Focus Depth Index — how deep was the focus in this window?
@@ -167,7 +224,21 @@ def focus_depth_index(
     Inputs:
         in_meeting: whether a calendar event was active
         slack_messages_received: incoming messages
-        context_switches: app switches (v2: from RescueTime, default 0)
+        context_switches: app switches proxy (Slack channels), used when
+            RescueTime data is not available
+        rt_app_switches: real app switch count from RescueTime (v1.2).
+            When provided and the machine was active, replaces the Slack
+            channel proxy with a direct behavioral measure.  Saturates
+            at 8 switches per 15 minutes (highly fragmented).
+        rt_active_seconds: active computer time; gates the RT signal.
+        rt_productivity_score: RescueTime productivity (0–1).  When
+            available, incorporated as an additional focus signal: a
+            distracted window has lower FDI independent of app switches.
+
+    v1.2: When RescueTime data is present (rt_app_switches is not None
+    and rt_active_seconds >= 60), real app-switch counts replace the
+    Slack-channels proxy for context switching, improving precision of
+    the FDI signal significantly.
     """
     # Meetings break focus
     meeting_disruption = 1.0 if in_meeting else 0.0
@@ -175,16 +246,34 @@ def focus_depth_index(
     # Slack interruptions
     slack_disruption = _norm(slack_messages_received, max_val=30)
 
-    # Context switches (v2: RescueTime; for now derived from slack channels)
-    switch_disruption = _norm(context_switches, max_val=20)
+    # Context switches:
+    # v1.2: use real RT app_switches when available (saturates at 8 per window)
+    # Fallback: Slack channels proxy (saturates at 20 for backward compat)
+    if rt_app_switches is not None and rt_active_seconds >= 60:
+        switch_disruption = _norm(rt_app_switches, max_val=_MAX_RT_APP_SWITCHES)
+    else:
+        switch_disruption = _norm(context_switches, max_val=20)
+
+    # v1.2: RT distraction signal — if the window was active but unproductive,
+    # that's a direct focus-fragmentation signal even without explicit app switches.
+    # Only applied when the machine was active so idle windows aren't penalised.
+    if rt_productivity_score is not None and rt_active_seconds >= 60:
+        # High distraction (low productivity) = additional disruption signal
+        rt_distraction = 1.0 - rt_productivity_score
+        # Weight: 0.80 existing disruption + 0.20 RT distraction blend
+        disruption = 0.80 * (
+            0.40 * meeting_disruption +
+            0.40 * slack_disruption +
+            0.20 * switch_disruption
+        ) + 0.20 * rt_distraction
+    else:
+        disruption = (
+            0.40 * meeting_disruption +
+            0.40 * slack_disruption +
+            0.20 * switch_disruption
+        )
 
     # FDI = 1 - disruption score
-    disruption = (
-        0.40 * meeting_disruption +
-        0.40 * slack_disruption +
-        0.20 * switch_disruption
-    )
-
     return round(_clamp(1.0 - disruption), 4)
 
 
@@ -232,6 +321,8 @@ def context_switch_cost(
     meeting_duration_minutes: int,
     slack_channels_active: int,
     is_short_meeting: bool = False,
+    rt_app_switches: Optional[int] = None,
+    rt_active_seconds: int = 0,
 ) -> float:
     """
     Context Switch Cost — fragmentation penalty for this window.
@@ -240,6 +331,15 @@ def context_switch_cost(
 
     Short meetings (<30 min) are costlier than long ones because they force
     rapid context switches without settling into deep work.
+
+    v1.2: When RescueTime data is available, real app-switch counts are
+    incorporated as an additional behavioral component.  This captures
+    digital context switching (IDE → browser → Slack → email) that the
+    existing meeting/channel signals cannot detect.
+
+    With RT: weights shift to 0.40 meetings, 0.25 channels, 0.20 calendar
+             fragmentation, 0.15 RT app switches.
+    Without RT: original weights (0.50/0.30/0.20).
     """
     # Short meetings are more costly context switches
     if in_meeting:
@@ -255,11 +355,21 @@ def context_switch_cost(
         0.5 if (in_meeting and meeting_duration_minutes < 30) else 0.0
     )
 
-    csc = (
-        0.50 * meeting_switch +
-        0.30 * channel_switch +
-        0.20 * fragmentation
-    )
+    # v1.2: real app-switch signal from RescueTime
+    if rt_app_switches is not None and rt_active_seconds >= 60:
+        app_switch_component = _norm(rt_app_switches, max_val=_MAX_RT_APP_SWITCHES)
+        csc = (
+            0.40 * meeting_switch +
+            0.25 * channel_switch +
+            0.20 * fragmentation +
+            0.15 * app_switch_component
+        )
+    else:
+        csc = (
+            0.50 * meeting_switch +
+            0.30 * channel_switch +
+            0.20 * fragmentation
+        )
 
     return round(_clamp(csc), 4)
 
@@ -337,12 +447,22 @@ def compute_metrics(window_data: dict) -> dict:
     - whoop: {recovery_score, hrv_rmssd_milli, sleep_performance}
     - slack: {messages_sent, messages_received, channels_active}
 
+    Optional (v1.2):
+    - rescuetime: {app_switches, productivity_score, active_seconds, ...}
+      When present and the machine was active, RescueTime signals upgrade
+      FDI, CSC, and CLS from proxy-based to signal-based computation.
+
     v1.1: hrv_rmssd_milli and sleep_performance are now forwarded to CLS
     and RAS so the physiological readiness composite is fully utilised.
+
+    v1.2: rescuetime sub-dict is now extracted and forwarded to CLS, FDI,
+    and CSC so that real behavioral signals (app_switches, productivity_score)
+    are used when available, replacing the Slack-channel proxies.
     """
     cal = window_data.get("calendar", {})
     whoop = window_data.get("whoop", {})
     slack = window_data.get("slack", {})
+    rt = window_data.get("rescuetime") or {}  # Optional — None-safe
 
     in_meeting = cal.get("in_meeting", False)
     meeting_attendees = cal.get("meeting_attendees", 0)
@@ -354,6 +474,11 @@ def compute_metrics(window_data: dict) -> dict:
     slack_received = slack.get("messages_received", 0)
     slack_channels = slack.get("channels_active", 0)
 
+    # RescueTime signals (None when RT is not configured/available)
+    rt_app_switches: Optional[int] = rt.get("app_switches") if rt else None
+    rt_productivity_score: Optional[float] = rt.get("productivity_score") if rt else None
+    rt_active_seconds: int = int(rt.get("active_seconds", 0)) if rt else 0
+
     cls = cognitive_load_score(
         in_meeting=in_meeting,
         meeting_attendees=meeting_attendees,
@@ -361,12 +486,17 @@ def compute_metrics(window_data: dict) -> dict:
         recovery_score=recovery_score,
         hrv_rmssd_milli=hrv_rmssd_milli,
         sleep_performance=sleep_performance,
+        rt_productivity_score=rt_productivity_score,
+        rt_active_seconds=rt_active_seconds,
     )
 
     fdi = focus_depth_index(
         in_meeting=in_meeting,
         slack_messages_received=slack_received,
-        context_switches=slack_channels,  # Proxy until RescueTime is available
+        context_switches=slack_channels,  # Proxy when RescueTime unavailable
+        rt_app_switches=rt_app_switches,
+        rt_active_seconds=rt_active_seconds,
+        rt_productivity_score=rt_productivity_score,
     )
 
     sdi = social_drain_index(
@@ -381,6 +511,8 @@ def compute_metrics(window_data: dict) -> dict:
         meeting_duration_minutes=meeting_duration,
         slack_channels_active=slack_channels,
         is_short_meeting=(meeting_duration < 30) if in_meeting else False,
+        rt_app_switches=rt_app_switches,
+        rt_active_seconds=rt_active_seconds,
     )
 
     ras = recovery_alignment_score(

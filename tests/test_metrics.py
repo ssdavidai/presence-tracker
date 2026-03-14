@@ -511,3 +511,361 @@ class TestComputeMetricsHRVIntegration:
         assert m_peak["cognitive_load_score"] < m_dep["cognitive_load_score"]
         # Peak readiness → higher RAS (better aligned)
         assert m_peak["recovery_alignment_score"] > m_dep["recovery_alignment_score"]
+
+
+# ─── v1.2: RescueTime integration tests ──────────────────────────────────────
+
+class TestCLSRescueTimeIntegration:
+    """CLS should incorporate RescueTime productivity_score when available."""
+
+    def test_low_rt_productivity_raises_cls(self):
+        """A distracted window (low productivity_score) should raise CLS."""
+        base_cls = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=90.0,
+        )
+        rt_distracted_cls = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=90.0,
+            rt_productivity_score=0.0,  # Very distracting
+            rt_active_seconds=300,
+        )
+        assert rt_distracted_cls > base_cls, (
+            f"Distracted RT window should raise CLS: {rt_distracted_cls} > {base_cls}"
+        )
+
+    def test_high_rt_productivity_lowers_cls(self):
+        """A focused window (high productivity_score) should lower CLS."""
+        base_cls = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=5,
+            recovery_score=70.0,
+        )
+        rt_focused_cls = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=5,
+            recovery_score=70.0,
+            rt_productivity_score=1.0,  # Very productive
+            rt_active_seconds=600,
+        )
+        assert rt_focused_cls < base_cls, (
+            f"Focused RT window should lower CLS: {rt_focused_cls} < {base_cls}"
+        )
+
+    def test_rt_idle_window_not_applied(self):
+        """RT productivity should NOT affect CLS when active_seconds < 60 (idle window)."""
+        base_cls = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=80.0,
+        )
+        rt_idle_cls = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=80.0,
+            rt_productivity_score=0.0,  # Would raise CLS if applied
+            rt_active_seconds=30,       # But below threshold (< 60s)
+        )
+        assert abs(rt_idle_cls - base_cls) < 0.001, (
+            f"Idle RT window should not affect CLS: base={base_cls}, rt={rt_idle_cls}"
+        )
+
+    def test_rt_none_score_backward_compat(self):
+        """When rt_productivity_score is None, CLS should be identical to v1.1 formula."""
+        v11_cls = cognitive_load_score(
+            in_meeting=True,
+            meeting_attendees=5,
+            slack_messages_received=10,
+            recovery_score=75.0,
+            hrv_rmssd_milli=60.0,
+        )
+        v12_cls = cognitive_load_score(
+            in_meeting=True,
+            meeting_attendees=5,
+            slack_messages_received=10,
+            recovery_score=75.0,
+            hrv_rmssd_milli=60.0,
+            rt_productivity_score=None,
+            rt_active_seconds=0,
+        )
+        assert v11_cls == v12_cls, (
+            f"None RT should not change CLS: v1.1={v11_cls}, v1.2={v12_cls}"
+        )
+
+    def test_cls_output_always_in_range(self):
+        """CLS should never go out of [0, 1] with any RT input."""
+        extremes = [
+            (0.0, 900), (1.0, 900), (0.5, 60), (0.0, 0), (1.0, 59),
+        ]
+        for prod_score, active_s in extremes:
+            cls = cognitive_load_score(
+                in_meeting=True,
+                meeting_attendees=10,
+                slack_messages_received=30,
+                recovery_score=0.0,
+                rt_productivity_score=prod_score,
+                rt_active_seconds=active_s,
+            )
+            assert 0.0 <= cls <= 1.0, f"CLS out of range with RT({prod_score}, {active_s}): {cls}"
+
+
+class TestFDIRescueTimeIntegration:
+    """FDI should use RT app_switches when available, replacing the Slack proxy."""
+
+    def test_many_app_switches_reduces_fdi(self):
+        """High app_switches from RT should reduce FDI (more fragmented)."""
+        fdi_no_rt = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+        )
+        fdi_with_rt = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+            rt_app_switches=8,  # Saturated — very fragmented
+            rt_active_seconds=600,
+        )
+        assert fdi_with_rt < fdi_no_rt, (
+            f"Many app switches should reduce FDI: {fdi_with_rt} < {fdi_no_rt}"
+        )
+
+    def test_zero_app_switches_maintains_fdi(self):
+        """Zero RT app switches should not reduce FDI below no-RT baseline."""
+        fdi_no_rt = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+        )
+        fdi_zero_rt = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+            rt_app_switches=0,
+            rt_active_seconds=600,
+            rt_productivity_score=1.0,  # Fully focused
+        )
+        assert fdi_zero_rt >= fdi_no_rt, (
+            f"Zero switches + high productivity should not reduce FDI: {fdi_zero_rt} >= {fdi_no_rt}"
+        )
+
+    def test_rt_idle_not_applied_to_fdi(self):
+        """RT data should not affect FDI when active_seconds < 60."""
+        fdi_no_rt = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+        )
+        fdi_idle_rt = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+            rt_app_switches=8,      # Would hurt FDI if applied
+            rt_active_seconds=30,   # Below threshold
+        )
+        assert abs(fdi_idle_rt - fdi_no_rt) < 0.001, (
+            f"Idle RT should not affect FDI: no_rt={fdi_no_rt}, idle_rt={fdi_idle_rt}"
+        )
+
+    def test_rt_distraction_reduces_fdi(self):
+        """Low RT productivity should reduce FDI even without many app switches."""
+        fdi_productive = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=2,
+            context_switches=0,
+            rt_app_switches=1,
+            rt_active_seconds=600,
+            rt_productivity_score=1.0,  # Very productive
+        )
+        fdi_distracted = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=2,
+            context_switches=0,
+            rt_app_switches=1,
+            rt_active_seconds=600,
+            rt_productivity_score=0.0,  # Very distracting
+        )
+        assert fdi_distracted < fdi_productive, (
+            f"Distracted RT should reduce FDI: {fdi_distracted} < {fdi_productive}"
+        )
+
+    def test_fdi_output_always_in_range(self):
+        """FDI should never go out of [0, 1] with any RT input."""
+        extremes = [
+            (8, 900, 0.0), (0, 900, 1.0), (4, 60, 0.5),
+            (8, 0, 0.0), (0, 0, None),
+        ]
+        for switches, active_s, prod in extremes:
+            fdi = focus_depth_index(
+                in_meeting=True,
+                slack_messages_received=30,
+                context_switches=20,
+                rt_app_switches=switches,
+                rt_active_seconds=active_s,
+                rt_productivity_score=prod,
+            )
+            assert 0.0 <= fdi <= 1.0, f"FDI out of range with RT({switches}, {active_s}, {prod}): {fdi}"
+
+
+class TestCSCRescueTimeIntegration:
+    """CSC should use RT app_switches as an additional fragmentation signal."""
+
+    def test_many_rt_switches_raises_csc(self):
+        """High RT app switches should raise CSC (more context switch cost)."""
+        csc_no_rt = context_switch_cost(
+            in_meeting=False,
+            meeting_duration_minutes=0,
+            slack_channels_active=1,
+        )
+        csc_with_rt = context_switch_cost(
+            in_meeting=False,
+            meeting_duration_minutes=0,
+            slack_channels_active=1,
+            rt_app_switches=8,
+            rt_active_seconds=600,
+        )
+        assert csc_with_rt > csc_no_rt, (
+            f"Many RT switches should raise CSC: {csc_with_rt} > {csc_no_rt}"
+        )
+
+    def test_zero_rt_switches_does_not_raise_csc(self):
+        """Zero RT app switches should not raise CSC above no-RT baseline."""
+        csc_no_rt = context_switch_cost(
+            in_meeting=False,
+            meeting_duration_minutes=0,
+            slack_channels_active=0,
+        )
+        csc_zero_rt = context_switch_cost(
+            in_meeting=False,
+            meeting_duration_minutes=0,
+            slack_channels_active=0,
+            rt_app_switches=0,
+            rt_active_seconds=600,
+        )
+        assert csc_zero_rt <= csc_no_rt, (
+            f"Zero RT switches should not raise CSC: {csc_zero_rt} <= {csc_no_rt}"
+        )
+
+    def test_rt_idle_not_applied_to_csc(self):
+        """RT data should not affect CSC when active_seconds < 60."""
+        csc_no_rt = context_switch_cost(
+            in_meeting=False,
+            meeting_duration_minutes=0,
+            slack_channels_active=0,
+        )
+        csc_idle_rt = context_switch_cost(
+            in_meeting=False,
+            meeting_duration_minutes=0,
+            slack_channels_active=0,
+            rt_app_switches=8,
+            rt_active_seconds=30,  # Below threshold
+        )
+        assert abs(csc_idle_rt - csc_no_rt) < 0.001, (
+            f"Idle RT should not affect CSC: no_rt={csc_no_rt}, idle_rt={csc_idle_rt}"
+        )
+
+    def test_csc_output_always_in_range(self):
+        """CSC should never go out of [0, 1] with any RT input."""
+        extremes = [(8, 900), (0, 900), (4, 60), (8, 0), (0, 0)]
+        for switches, active_s in extremes:
+            csc = context_switch_cost(
+                in_meeting=True,
+                meeting_duration_minutes=10,
+                slack_channels_active=5,
+                is_short_meeting=True,
+                rt_app_switches=switches,
+                rt_active_seconds=active_s,
+            )
+            assert 0.0 <= csc <= 1.0, f"CSC out of range with RT({switches}, {active_s}): {csc}"
+
+
+class TestComputeMetricsRescueTimePassthrough:
+    """compute_metrics() should pass RT data through to CLS, FDI, CSC."""
+
+    def _window(self, rt_data=None):
+        base = {
+            "calendar": {"in_meeting": False, "meeting_attendees": 0, "meeting_duration_minutes": 0},
+            "whoop": {"recovery_score": 80.0, "hrv_rmssd_milli": 65.0, "sleep_performance": 85.0},
+            "slack": {"messages_sent": 2, "messages_received": 3, "channels_active": 1},
+        }
+        if rt_data is not None:
+            base["rescuetime"] = rt_data
+        return base
+
+    def test_no_rt_key_does_not_crash(self):
+        """compute_metrics should work fine without a 'rescuetime' key."""
+        metrics = compute_metrics(self._window())
+        assert all(k in metrics for k in [
+            "cognitive_load_score", "focus_depth_index", "social_drain_index",
+            "context_switch_cost", "recovery_alignment_score"
+        ])
+
+    def test_rt_none_does_not_crash(self):
+        """compute_metrics should handle rescuetime=None gracefully."""
+        window = self._window()
+        window["rescuetime"] = None
+        metrics = compute_metrics(window)
+        assert all(0.0 <= v <= 1.0 for v in metrics.values())
+
+    def test_rt_distracted_raises_cls_vs_no_rt(self):
+        """compute_metrics with distracted RT data should produce higher CLS."""
+        m_no_rt = compute_metrics(self._window())
+        m_distracted = compute_metrics(self._window({
+            "app_switches": 5,
+            "productivity_score": 0.0,
+            "active_seconds": 600,
+            "focus_seconds": 0,
+            "distraction_seconds": 600,
+        }))
+        assert m_distracted["cognitive_load_score"] > m_no_rt["cognitive_load_score"], (
+            "Distracted RT should raise CLS in compute_metrics pipeline"
+        )
+
+    def test_rt_fragmented_reduces_fdi_vs_no_rt(self):
+        """compute_metrics with high app_switches should produce lower FDI."""
+        m_no_rt = compute_metrics(self._window())
+        m_fragmented = compute_metrics(self._window({
+            "app_switches": 8,
+            "productivity_score": 0.2,
+            "active_seconds": 700,
+            "focus_seconds": 100,
+            "distraction_seconds": 400,
+        }))
+        assert m_fragmented["focus_depth_index"] < m_no_rt["focus_depth_index"], (
+            "Fragmented RT should reduce FDI in compute_metrics pipeline"
+        )
+
+    def test_rt_fragmented_raises_csc_vs_no_rt(self):
+        """compute_metrics with high app_switches should produce higher CSC."""
+        m_no_rt = compute_metrics(self._window())
+        m_fragmented = compute_metrics(self._window({
+            "app_switches": 8,
+            "productivity_score": 0.3,
+            "active_seconds": 800,
+            "focus_seconds": 200,
+            "distraction_seconds": 300,
+        }))
+        assert m_fragmented["context_switch_cost"] > m_no_rt["context_switch_cost"], (
+            "Fragmented RT should raise CSC in compute_metrics pipeline"
+        )
+
+    def test_all_metrics_in_range_with_rt(self):
+        """All metrics should stay in [0, 1] when RT data is present."""
+        rt_data = {
+            "app_switches": 6,
+            "productivity_score": 0.3,
+            "active_seconds": 720,
+            "focus_seconds": 200,
+            "distraction_seconds": 400,
+        }
+        metrics = compute_metrics(self._window(rt_data))
+        for name, val in metrics.items():
+            assert 0.0 <= val <= 1.0, f"Metric {name} out of range with RT: {val}"
