@@ -118,6 +118,35 @@ v1.6 — Solo-meeting fix extended to CSC:
     - Social meeting, short (<30 min): CSC ≈ 0.45–0.55 (unchanged)
     - CSC is now semantically consistent with CLS, FDI, and SDI across all
       four meeting-sensitive metrics.
+
+v2.0 — Omi transcript integration:
+  cognitive_load_score(), social_drain_index(), and focus_depth_index() now
+  accept optional Omi transcript signals:
+
+  CLS: spoken conversation in a window is a direct cognitive-load signal.
+    Processing live speech, formulating verbal responses, and tracking
+    multi-participant discussions are all high-demand tasks.
+    omi_conversation_active and omi_word_count upgrade the Slack-message
+    proxy with a real spoken-word signal.
+
+  SDI: spoken conversation is the most direct social-energy signal possible
+    — far more demanding than text messages.  omi_speech_seconds drives
+    the Omi component of SDI proportionally to actual speaking time.
+
+  FDI: active conversation (Omi) is a disruption to deep focus, just as
+    social meetings are.  When Omi signals a conversation, the disruption
+    component increases proportionally to speech ratio.
+
+  All three functions add optional omi_* kwargs that default to None / 0 so
+  existing callers without Omi data continue to work unchanged.  Omi signals
+  blend into existing weights rather than replacing them, so the metric
+  degrades gracefully to baseline when Omi is unavailable.
+
+  Impact:
+    - Windows with active spoken conversation: CLS +0.05–0.15, FDI −0.05–0.15,
+      SDI +0.05–0.20 (proportional to word count / speech duration)
+    - Windows without Omi: identical to previous behaviour (all changes backward-compatible)
+    - sources_available gains "omi" when transcript data is present for that window
 """
 
 from typing import Optional
@@ -220,6 +249,8 @@ def cognitive_load_score(
     window_duration_minutes: int = 15,
     rt_productivity_score: Optional[float] = None,
     rt_active_seconds: int = 0,
+    omi_conversation_active: bool = False,
+    omi_word_count: int = 0,
 ) -> float:
     """
     Cognitive Load Score — how mentally demanding was this window?
@@ -241,6 +272,12 @@ def cognitive_load_score(
         rt_active_seconds: total active computer time in this window (0–900).
             Used to gate the RT signal: if the computer was idle, RT
             distraction data is not meaningful.
+        omi_conversation_active: bool — at least one Omi transcript session
+            started in this window.  Spoken conversation = high cognitive demand.
+            (v2.0 — Omi transcript integration)
+        omi_word_count: int — total words spoken across Omi sessions in window.
+            More words = higher engagement = higher CLS.  Saturates at 500 words
+            per 15-min window (≈33 words/min = dense conversation).
 
     v1.5 — Solo-meeting fix:
         meeting_component and calendar_pressure only fire for social meetings
@@ -248,6 +285,16 @@ def cognitive_load_score(
         personal event, attendees=0/1) does NOT generate the coordination
         and participation overhead that meeting_component captures.
         Consistent with the v1.4 solo-meeting fix applied to FDI and SDI.
+
+    v2.0 — Omi integration:
+        When omi_conversation_active is True, an Omi spoken-conversation signal
+        is blended into CLS.  The blend weight is 0.10 (10%) applied on top of
+        the base formula:
+          omi_component = 0.5 + 0.5 * word_density  (0.5 baseline + word-count boost)
+          cls = 0.90 * base_cls + 0.10 * omi_component
+        This is conservative — Omi adds a nudge rather than dominating the metric.
+        A quiet-but-active Omi window (few words) raises CLS by ~0.05 over baseline.
+        A word-dense Omi window (>500 words) raises CLS by ~0.08–0.10.
     """
     # Component: meeting density
     # v1.5 solo-meeting fix: only fire for social meetings (other attendees present).
@@ -294,7 +341,19 @@ def cognitive_load_score(
     if rt_productivity_score is not None and rt_active_seconds >= 60:
         # Low productivity score = high distraction = higher demand
         rt_demand = 1.0 - rt_productivity_score
-        cls = 0.75 * base_cls + 0.25 * rt_demand
+        base_cls = 0.75 * base_cls + 0.25 * rt_demand
+
+    # v2.0: Omi spoken-conversation signal
+    # Live spoken conversation is cognitively demanding: David must process speech,
+    # formulate verbal responses, and track conversation threads in real time.
+    # Word-count density captures engagement depth: a 5-word exchange is light;
+    # a 500-word back-and-forth is intense.
+    # Saturates at 500 words/window (≈33 wpm, dense conversation for 15 min).
+    if omi_conversation_active:
+        word_density = _norm(omi_word_count, max_val=500)
+        # omi_component: 0.5 baseline (just being in conversation) + 0.5 * word density
+        omi_component = 0.5 + 0.5 * word_density
+        cls = 0.90 * base_cls + 0.10 * omi_component
     else:
         cls = base_cls
 
@@ -311,6 +370,8 @@ def focus_depth_index(
     rt_active_seconds: int = 0,
     rt_productivity_score: Optional[float] = None,
     meeting_attendees: int = 0,
+    omi_conversation_active: bool = False,
+    omi_speech_ratio: float = 0.0,
 ) -> float:
     """
     Focus Depth Index — how deep was the focus in this window?
@@ -333,6 +394,11 @@ def focus_depth_index(
         meeting_attendees: number of participants in the active meeting
             (v1.4).  When provided, used to distinguish social meetings
             (disrupted focus) from solo focus blocks (protected time).
+        omi_conversation_active: bool — at least one Omi session in this window.
+            Active spoken conversation disrupts deep focus.
+            (v2.0 — Omi transcript integration)
+        omi_speech_ratio: float — speech_seconds / audio_seconds (0.0–1.0).
+            Higher ratio = more active conversation = more disruption.
 
     v1.2: When RescueTime data is present (rt_app_switches is not None
     and rt_active_seconds >= 60), real app-switch counts replace the
@@ -345,6 +411,15 @@ def focus_depth_index(
       deep work; solo blocks protect it.  meeting_disruption now only fires for
       social meetings (meeting_attendees > 1), so deliberate focus-block scheduling
       is no longer penalised as a disruption in the FDI signal.
+
+    v2.0 — Omi integration:
+      Active spoken conversation disrupts deep focus.  When Omi reports a
+      conversation in this window, an omi_disruption component is blended in:
+        omi_disruption = 0.5 + 0.5 * speech_ratio
+        (0.5 baseline for being in any conversation + 0.5 * density)
+      FDI = 0.90 * base_fdi - 0.10 * omi_disruption  (clamped to [0, 1])
+      A heavily spoken window (speech_ratio ≈ 1.0) reduces FDI by ≈ 0.09–0.10.
+      A light Omi session (speech_ratio ≈ 0.3) reduces FDI by ≈ 0.06.
     """
     # Social meetings (with other attendees) break focus.
     # Solo calendar blocks (focus sessions, personal events) do not.
@@ -381,8 +456,20 @@ def focus_depth_index(
             0.20 * switch_disruption
         )
 
-    # FDI = 1 - disruption score
-    return round(_clamp(1.0 - disruption), 4)
+    # v2.0: Omi spoken-conversation disruption signal.
+    # Active conversation breaks the focus state regardless of meeting status.
+    # speech_ratio (0–1) captures how dense the conversation was:
+    # low ratio = brief/sporadic speech; high ratio = sustained conversation.
+    if omi_conversation_active:
+        omi_disruption = 0.5 + 0.5 * _clamp(omi_speech_ratio)
+        # Blend: Omi adds 10% disruption weight on top of base calculation
+        fdi = _clamp(1.0 - disruption) * 0.90 - 0.10 * omi_disruption + 0.10
+        # Simplification: fdi = 0.90*(1-disruption) + 0.10*(1-omi_disruption)
+        fdi = 0.90 * (1.0 - disruption) + 0.10 * (1.0 - omi_disruption)
+    else:
+        fdi = 1.0 - disruption
+
+    return round(_clamp(fdi), 4)
 
 
 # ─── SDI: Social Drain Index ─────────────────────────────────────────────────
@@ -392,6 +479,8 @@ def social_drain_index(
     meeting_attendees: int,
     slack_messages_sent: int,
     slack_messages_received: int,
+    omi_conversation_active: bool = False,
+    omi_speech_seconds: float = 0.0,
 ) -> float:
     """
     Social Drain Index — how much social energy was expended?
@@ -412,6 +501,19 @@ def social_drain_index(
 
       The fix: is_social_meeting = in_meeting AND meeting_attendees > 1
       Solo focus blocks (attendees ≤ 1) correctly return SDI near 0.
+
+    v2.0 — Omi integration:
+      Spoken conversation is the most direct social-energy signal possible.
+      A 10-minute voice conversation drains far more social energy than
+      10 Slack messages.  omi_speech_seconds captures actual speaking time:
+
+      omi_sdi_component = speech_seconds / 900  (900s = full 15-min window)
+      When omi is active: SDI = 0.85 * base_sdi + 0.15 * omi_component
+
+      The 15% Omi blend is conservative but meaningful:
+      - 900s speech (full window active) adds ~0.15 to SDI
+      - 180s speech (typical 3-min Omi session) adds ~0.03 to SDI
+      - No Omi: identical to baseline (backward-compatible)
     """
     # A meeting is "social" only when there is at least one other participant.
     # Solo focus blocks, personal events, and calendar reminders have 0–1 attendee
@@ -431,11 +533,21 @@ def social_drain_index(
     else:
         sent_ratio = 0.0
 
-    sdi = (
+    base_sdi = (
         0.50 * attendee_component +
         0.30 * meeting_component +
         0.20 * sent_ratio
     )
+
+    # v2.0: Omi spoken-conversation signal
+    # Spoken conversation is inherently social — it requires real-time engagement
+    # with another person and is more draining than text communication.
+    # speech_seconds saturates at 900 (full 15-min window of continuous speech).
+    if omi_conversation_active and omi_speech_seconds > 0:
+        omi_component = _norm(omi_speech_seconds, max_val=900.0)
+        sdi = 0.85 * base_sdi + 0.15 * omi_component
+    else:
+        sdi = base_sdi
 
     return round(_clamp(sdi), 4)
 
@@ -597,6 +709,12 @@ def compute_metrics(window_data: dict) -> dict:
       When present and the machine was active, RescueTime signals upgrade
       FDI, CSC, and CLS from proxy-based to signal-based computation.
 
+    Optional (v2.0):
+    - omi: {conversation_active, word_count, speech_seconds, audio_seconds,
+            sessions_count, speech_ratio}
+      When present, Omi spoken-conversation signals upgrade CLS, SDI, and FDI
+      with real verbal interaction data.
+
     v1.1: hrv_rmssd_milli and sleep_performance are now forwarded to CLS
     and RAS so the physiological readiness composite is fully utilised.
 
@@ -607,11 +725,16 @@ def compute_metrics(window_data: dict) -> dict:
     v1.6: meeting_attendees is now forwarded to CSC so that the solo-meeting
     fix (is_social_meeting gate) applies consistently across all four meeting-
     sensitive metrics: CLS, FDI, SDI, and CSC.
+
+    v2.0: omi sub-dict is extracted and forwarded to CLS, FDI, and SDI so that
+    real spoken-conversation signals upgrade those three metrics when Omi
+    transcript data is available.
     """
     cal = window_data.get("calendar", {})
     whoop = window_data.get("whoop", {})
     slack = window_data.get("slack", {})
     rt = window_data.get("rescuetime") or {}  # Optional — None-safe
+    omi = window_data.get("omi") or {}        # Optional — None-safe (v2.0)
 
     in_meeting = cal.get("in_meeting", False)
     meeting_attendees = cal.get("meeting_attendees", 0)
@@ -628,6 +751,12 @@ def compute_metrics(window_data: dict) -> dict:
     rt_productivity_score: Optional[float] = rt.get("productivity_score") if rt else None
     rt_active_seconds: int = int(rt.get("active_seconds", 0)) if rt else 0
 
+    # Omi spoken-conversation signals (v2.0)
+    omi_conversation_active: bool = bool(omi.get("conversation_active", False)) if omi else False
+    omi_word_count: int = int(omi.get("word_count", 0)) if omi else 0
+    omi_speech_seconds: float = float(omi.get("speech_seconds", 0.0)) if omi else 0.0
+    omi_speech_ratio: float = float(omi.get("speech_ratio", 0.0)) if omi else 0.0
+
     cls = cognitive_load_score(
         in_meeting=in_meeting,
         meeting_attendees=meeting_attendees,
@@ -637,6 +766,8 @@ def compute_metrics(window_data: dict) -> dict:
         sleep_performance=sleep_performance,
         rt_productivity_score=rt_productivity_score,
         rt_active_seconds=rt_active_seconds,
+        omi_conversation_active=omi_conversation_active,  # v2.0
+        omi_word_count=omi_word_count,                    # v2.0
     )
 
     fdi = focus_depth_index(
@@ -646,7 +777,9 @@ def compute_metrics(window_data: dict) -> dict:
         rt_app_switches=rt_app_switches,
         rt_active_seconds=rt_active_seconds,
         rt_productivity_score=rt_productivity_score,
-        meeting_attendees=meeting_attendees,  # v1.4: solo-block awareness
+        meeting_attendees=meeting_attendees,              # v1.4: solo-block awareness
+        omi_conversation_active=omi_conversation_active,  # v2.0
+        omi_speech_ratio=omi_speech_ratio,                # v2.0
     )
 
     sdi = social_drain_index(
@@ -654,6 +787,8 @@ def compute_metrics(window_data: dict) -> dict:
         meeting_attendees=meeting_attendees,
         slack_messages_sent=slack_sent,
         slack_messages_received=slack_received,
+        omi_conversation_active=omi_conversation_active,  # v2.0
+        omi_speech_seconds=omi_speech_seconds,            # v2.0
     )
 
     csc = context_switch_cost(

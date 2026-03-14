@@ -29,7 +29,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config import SLACK_LOGS_CHANNEL, GATEWAY_URL, GATEWAY_TOKEN
-from collectors import whoop, gcal, slack, rescuetime
+from collectors import whoop, gcal, slack, rescuetime, omi
 from engine.chunker import build_windows
 from engine.chunker import summarize_day as _summarize_day
 from engine.store import write_day, update_summary, day_exists
@@ -137,6 +137,22 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
             print(f"[presence] RescueTime collection failed (non-fatal): {e}", file=sys.stderr)
         rescuetime_windows = {}
 
+    # ── Step 3.6: Collect Omi transcripts (optional) ──────────────────────
+    omi_windows = {}
+    try:
+        omi_windows = omi.collect(date_str)
+        active_omi = sum(1 for w in omi_windows.values() if w.get("conversation_active", False))
+        if active_omi > 0:
+            if not quiet:
+                print(f"[presence] Omi: {active_omi} windows with conversation")
+        else:
+            if not quiet:
+                print("[presence] Omi: no transcripts found for this date")
+    except Exception as e:
+        if not quiet:
+            print(f"[presence] Omi collection failed (non-fatal): {e}", file=sys.stderr)
+        omi_windows = {}
+
     # ── Step 4: Build windows ─────────────────────────────────────────────
     if not quiet:
         print("[presence] Building 15-minute windows...")
@@ -146,6 +162,7 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
         calendar_data=calendar_data,
         slack_windows=slack_windows,
         rescuetime_windows=rescuetime_windows,
+        omi_windows=omi_windows,
     )
     if not quiet:
         print(f"  Built {len(windows)} windows")

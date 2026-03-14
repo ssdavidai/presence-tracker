@@ -68,6 +68,7 @@ def build_windows(
     calendar_data: dict,
     slack_windows: dict,
     rescuetime_windows: dict | None = None,
+    omi_windows: dict | None = None,
 ) -> list[dict]:
     """
     Build 96 observation windows for a given date.
@@ -79,6 +80,8 @@ def build_windows(
         slack_windows: output from collectors.slack.collect() (keyed by window_index)
         rescuetime_windows: output from collectors.rescuetime.collect() (keyed by
             window_index), optional. If None or empty, rescuetime signals are omitted.
+        omi_windows: output from collectors.omi.collect() (keyed by window_index),
+            optional. If None or empty, Omi signals are omitted. (v2.0)
 
     Returns:
         List of 96 window dicts, each conforming to the schema in SPEC.md
@@ -160,29 +163,42 @@ def build_windows(
             "top_activity": window_rt.get("top_activity"),
         } if rt_windows else None
 
+        # ── Omi transcript signals (v2.0) ─────────────────────────────────
+        # The Omi collector returns only windows that had ≥1 transcript session.
+        # For windows without Omi data, omi_signals is None (key omitted from JSONL).
+        # This keeps the schema clean: downstream code can detect Omi presence by
+        # checking for the "omi" key rather than checking conversation_active.
+        omi_ws = omi_windows or {}
+        window_omi_raw = omi_ws.get(i)  # None if no Omi data for this window
+        if window_omi_raw is not None:
+            omi_signals = {
+                "conversation_active": window_omi_raw.get("conversation_active", False),
+                "word_count": window_omi_raw.get("word_count", 0),
+                "speech_seconds": window_omi_raw.get("speech_seconds", 0.0),
+                "audio_seconds": window_omi_raw.get("audio_seconds", 0.0),
+                "sessions_count": window_omi_raw.get("sessions_count", 0),
+                "speech_ratio": window_omi_raw.get("speech_ratio", 0.0),
+            }
+        else:
+            omi_signals = None
+
         # ── Metric computation ────────────────────────────────────────────
         metrics = compute_metrics({
             "calendar": cal_signals,
             "whoop": whoop_signals,
             "slack": slack_signals,
             **({"rescuetime": rescuetime_signals} if rescuetime_signals else {}),
+            **({"omi": omi_signals} if omi_signals else {}),
         })
 
         # ── Active window detection ───────────────────────────────────────
-        # A window is "active" when at least one behavioral signal is present.
-        # This distinguishes genuine idle periods (sleep, away-from-keyboard)
-        # from deep-focus working periods that happen to have no interruptions.
-        #
-        # Why this matters:
-        # FDI=1.0 for idle windows is mathematically correct (zero disruption)
-        # but analytically misleading — it inflates daily average FDI.  The
-        # `is_active_window` flag lets downstream code filter to only windows
-        # where David was actually engaged, making FDI stats meaningful.
         rt_active_secs = (rescuetime_signals or {}).get("active_seconds", 0)
+        omi_active = bool((omi_signals or {}).get("conversation_active", False))
         is_active = (
             cal_signals["in_meeting"]
             or slack_signals["total_messages"] > 0
             or rt_active_secs > 0
+            or omi_active
         )
 
         # ── Metadata ──────────────────────────────────────────────────────
@@ -195,6 +211,8 @@ def build_windows(
             sources.append("slack")
         if rescuetime_signals and rescuetime_signals.get("active_seconds", 0) > 0:
             sources.append("rescuetime")
+        if omi_signals and omi_signals.get("conversation_active", False):
+            sources.append("omi")
 
         window = {
             "window_id": window_start.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -206,6 +224,7 @@ def build_windows(
             "whoop": whoop_signals,
             "slack": slack_signals,
             **({"rescuetime": rescuetime_signals} if rescuetime_signals else {}),
+            **({"omi": omi_signals} if omi_signals else {}),
             "metrics": metrics,
             "metadata": {
                 "day_of_week": day_of_week,
