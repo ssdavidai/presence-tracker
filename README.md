@@ -129,6 +129,7 @@ python3 scripts/recompute_metrics.py --dry-run  # Preview changes
 | `MorningBriefWorkflow` | 07:00 daily | WHOOP readiness + day planning brief |
 | `DailyIngestionWorkflow` | 23:45 daily | Ingest all sources, write JSONL, dashboard, anomaly check |
 | `WeeklyAnalysisWorkflow` | Sunday 21:00 | Alfred Intuition pattern report |
+| `MonthlyMLRetrainWorkflow` | 1st of month 02:00 | Retrain Isolation Forest + Random Forest + KMeans |
 
 ### Start the worker
 
@@ -346,6 +347,7 @@ presence-tracker/
 | **v5.0** | Multi-source anomaly alerts — CLS spike, FDI collapse, RAS streak; wired into DailyIngestionWorkflow |
 | **v5.1** | Test coverage expansion — store layer (7→32 tests), Omi assertion fixes |
 | **v5.2** | `scripts/status.py` — system health CLI with 7-section report, `--brief`, `--json` modes |
+| **v7.2** | `MonthlyMLRetrainWorkflow` — automated monthly ML retraining; worker + schedules updated to register all workflows/activities |
 
 ---
 

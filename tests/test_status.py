@@ -29,6 +29,7 @@ from scripts.status import (
     _colour_fdi,
     _colour_recovery,
     _fmt_anomaly_section,
+    _fmt_cognitive_debt_section,
     _fmt_dashboard_section,
     _fmt_data_section,
     _fmt_metrics_section,
@@ -118,6 +119,7 @@ def _make_status(
             if anomaly_count > 0
             else {}
         ),
+        "cognitive_debt": {},  # Empty by default → "not yet meaningful" display
     }
 
 
@@ -417,6 +419,70 @@ class TestFmtAnomalySection:
         text = "\n".join(lines)
         assert "cls" in text.lower()
         assert "fdi" in text.lower()
+
+
+class TestFmtCognitiveDebtSection:
+    def test_empty_dict_shows_not_meaningful(self):
+        lines = _fmt_cognitive_debt_section({})
+        text = "\n".join(lines)
+        assert "not yet" in text.lower() or "need" in text.lower()
+
+    def test_meaningful_shows_cdi_score(self):
+        cdi = {
+            "cdi": 63.0,
+            "tier": "loading",
+            "days_in_deficit": 5,
+            "days_used": 10,
+            "trend_5d": 0.04,
+            "line": "🟠 CDI 63/100 — Loading",
+        }
+        lines = _fmt_cognitive_debt_section(cdi)
+        text = "\n".join(lines)
+        assert "63" in text
+
+    def test_shows_tier(self):
+        cdi = {
+            "cdi": 75.0,
+            "tier": "fatigued",
+            "days_in_deficit": 8,
+            "days_used": 14,
+            "trend_5d": 0.06,
+            "line": "🔴 CDI 75/100 — Fatigued",
+        }
+        lines = _fmt_cognitive_debt_section(cdi)
+        text = "\n".join(lines)
+        assert "fatigued" in text.lower()
+
+    def test_shows_deficit_days(self):
+        cdi = {
+            "cdi": 55.0,
+            "tier": "loading",
+            "days_in_deficit": 4,
+            "days_used": 7,
+            "trend_5d": None,
+            "line": "🟠 CDI 55/100 — Loading",
+        }
+        lines = _fmt_cognitive_debt_section(cdi)
+        text = "\n".join(lines)
+        assert "4" in text
+
+    def test_surplus_tier_output(self):
+        cdi = {
+            "cdi": 22.0,
+            "tier": "surplus",
+            "days_in_deficit": 1,
+            "days_used": 7,
+            "trend_5d": -0.05,
+            "line": "🟢 CDI 22/100 — Surplus",
+        }
+        lines = _fmt_cognitive_debt_section(cdi)
+        text = "\n".join(lines)
+        assert "surplus" in text.lower()
+
+    def test_header_present(self):
+        lines = _fmt_cognitive_debt_section({})
+        assert len(lines) >= 1
+        assert "Cognitive Debt" in lines[0]
 
 
 class TestFmtDashboardSection:

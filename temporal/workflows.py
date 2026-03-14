@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
         notify_slack_presence,
         generate_daily_dashboard,
         run_anomaly_alerts,
+        retrain_ml_models,
     )
 
 RETRY_POLICY = RetryPolicy(
@@ -202,3 +203,83 @@ class WeeklyAnalysisWorkflow:
         )
 
         return f"Weekly analysis {status}: {date_str}"
+
+
+@workflow.defn
+class MonthlyMLRetrainWorkflow:
+    """
+    Monthly ML model retraining.
+
+    Retrains the three scikit-learn models (Isolation Forest, Random Forest,
+    KMeans) on all accumulated JSONL data.  Runs on the 1st of each month at
+    02:00 Budapest time — low-traffic window, after the previous month's data
+    has been fully ingested.
+
+    Design notes:
+    - Always passes force=True so the retrain runs even before 60 days have
+      accumulated.  Early models are noisy but still useful as baselines;
+      they are replaced each month as data grows.
+    - A Slack log is sent regardless of outcome so David knows whether the
+      monthly retrain succeeded or failed.
+    - The workflow is idempotent: re-triggering it manually is safe.
+
+    Schedule: 1st of month, 01:00 UTC = 02:00 Budapest (CET/UTC+1).
+    """
+
+    @workflow.run
+    async def run(self, force: bool = True) -> str:
+        workflow.logger.info("Starting monthly ML model retraining")
+
+        try:
+            result = await workflow.execute_activity(
+                retrain_ml_models,
+                args=[force],
+                start_to_close_timeout=timedelta(minutes=15),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(minutes=1),
+                    backoff_coefficient=2.0,
+                    maximum_interval=timedelta(minutes=10),
+                    maximum_attempts=3,
+                ),
+            )
+
+            status = result.get("status", "unknown")
+            days = result.get("days_used", result.get("days_available", "?"))
+            anomaly_st = result.get("anomaly", "?")
+            recovery_st = result.get("recovery", "?")
+            cluster_st = result.get("clustering", "?")
+
+            if status == "insufficient_data":
+                msg = (
+                    f"[PRESENCE] Monthly ML retrain — insufficient data "
+                    f"({days} days, need 60). Skipped."
+                )
+            elif status == "error":
+                msg = (
+                    f"[PRESENCE] Monthly ML retrain FAILED — "
+                    f"{result.get('error', 'unknown error')}"
+                )
+            else:
+                msg = (
+                    f"[PRESENCE] Monthly ML retrain complete — {days} days of data\n"
+                    f"anomaly={anomaly_st} | recovery={recovery_st} | clusters={cluster_st}"
+                )
+
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[msg],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            workflow.logger.info(f"ML retrain done: {status}")
+            return f"ML retrain {status}: {days} days"
+
+        except Exception as e:
+            error_msg = f"[PRESENCE] Monthly ML retrain FAILED: {str(e)}"
+            workflow.logger.error(error_msg)
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[error_msg],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            raise

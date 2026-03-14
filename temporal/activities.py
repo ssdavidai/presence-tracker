@@ -97,6 +97,61 @@ async def run_weekly_summary(date_str: str) -> bool:
 
 
 @activity.defn
+async def retrain_ml_models(force: bool = False) -> dict:
+    """Train (or retrain) the three scikit-learn ML models.
+
+    Wraps analysis.ml_model.train_all().  Returns the training result dict
+    with per-model status ('trained' | 'skipped' | 'error') so the workflow
+    can log outcomes without knowing ML internals.
+
+    Args:
+        force: Train even when fewer than ML_MIN_DAYS (60) days of data are
+               available.  Useful for monthly retrains on early-deployment
+               systems; the caller (MonthlyMLRetrainWorkflow) passes True so
+               the monthly cycle always produces a fresh model.
+
+    Returns a dict:
+        {
+            "status": "trained" | "insufficient_data" | "error",
+            "days_used": int,
+            "anomaly": "trained" | "skipped" | "error",
+            "recovery": "trained" | "skipped" | "error",
+            "clustering": "trained" | "skipped" | "error",
+        }
+    """
+    from analysis.ml_model import train_all, get_data_status
+    try:
+        # Log data status before training — failures here are non-fatal.
+        try:
+            status = get_data_status()
+            days_available = status.get("days_available", 0)
+            activity.logger.info(
+                f"ML retrain: {days_available} days available "
+                f"(min={status.get('min_days_required', 60)}, force={force})"
+            )
+        except Exception as status_err:
+            activity.logger.warning(f"ML retrain: get_data_status failed ({status_err}); proceeding with train_all")
+
+        result = train_all(force=force)
+        activity.logger.info(
+            f"ML retrain complete: {result.get('status')} — "
+            f"anomaly={result.get('anomaly')}, "
+            f"recovery={result.get('recovery')}, "
+            f"clustering={result.get('clustering')}"
+        )
+        return result
+    except Exception as e:
+        activity.logger.error(f"ML retrain failed: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "anomaly": "error",
+            "recovery": "error",
+            "clustering": "error",
+        }
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

@@ -30,7 +30,12 @@ from temporalio.client import (
 )
 
 from config import TEMPORAL_ADDRESS, TASK_QUEUE
-from temporal.workflows import DailyIngestionWorkflow, WeeklyAnalysisWorkflow, MorningBriefWorkflow
+from temporal.workflows import (
+    DailyIngestionWorkflow,
+    WeeklyAnalysisWorkflow,
+    MorningBriefWorkflow,
+    MonthlyMLRetrainWorkflow,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,6 +65,16 @@ SCHEDULES = [
         "workflow": WeeklyAnalysisWorkflow,
         "workflow_id": "presence-weekly-analysis-workflow",
         "description": "Weekly Alfred Intuition pattern analysis",
+    },
+    {
+        "id": "presence-monthly-ml-retrain",
+        # 01:00 UTC = 02:00 Budapest (CET/UTC+1). 1st of each month.
+        # Low-traffic window; runs after the previous month is fully ingested.
+        # force=True so the retrain always runs even before 60 days have accumulated.
+        "cron": "0 1 1 * *",
+        "workflow": MonthlyMLRetrainWorkflow,
+        "workflow_id": "presence-monthly-ml-retrain-workflow",
+        "description": "Monthly ML model retraining (Isolation Forest + Random Forest + KMeans)",
     },
 ]
 
