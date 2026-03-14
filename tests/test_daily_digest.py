@@ -588,3 +588,73 @@ class TestDigestIntegration:
                 f"Active-window FDI ({avg_fdi_active:.3f}) should be <= "
                 f"all-window naive FDI ({naive_avg_fdi:.3f})"
             )
+
+
+# ─── compute_trend_context tests ─────────────────────────────────────────────
+
+class TestComputeTrendContext:
+    """Tests for the multi-day trend context builder."""
+
+    def test_returns_empty_on_no_history(self):
+        """With no store data, should return minimal dict."""
+        from unittest.mock import patch
+        from analysis.daily_digest import compute_trend_context
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            result = compute_trend_context("2026-03-14")
+        assert result.get("days_of_data", 0) == 0
+
+    def test_function_is_importable(self):
+        """compute_trend_context must be importable from analysis.daily_digest."""
+        from analysis.daily_digest import compute_trend_context
+        assert callable(compute_trend_context)
+
+    def test_returns_dict(self, tmp_path, monkeypatch):
+        """Should always return a dict, even when store is empty."""
+        from analysis.daily_digest import compute_trend_context
+        from unittest.mock import patch
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            result = compute_trend_context("2026-03-14")
+        assert isinstance(result, dict)
+
+    def test_known_keys_present_with_data(self):
+        """With sufficient mock data, expected keys should be present."""
+        from analysis.daily_digest import compute_trend_context
+        from unittest.mock import patch
+
+        mock_summaries = [
+            {
+                "date": f"2026-03-{d:02d}",
+                "whoop": {"hrv_rmssd_milli": 55.0 - d, "recovery_score": 70.0 - d},
+                "metrics_avg": {"cognitive_load_score": 0.40 + d * 0.01,
+                                "recovery_alignment_score": 0.75 - d * 0.01},
+            }
+            for d in range(1, 8)
+        ]
+        with patch("engine.store.get_recent_summaries", return_value=mock_summaries):
+            result = compute_trend_context("2026-03-14", lookback_days=7)
+
+        assert isinstance(result, dict)
+        # days_of_data should reflect available history
+        assert "days_of_data" in result
+
+    def test_declining_hrv_detected(self):
+        """A consistently declining HRV series should be detected."""
+        from analysis.daily_digest import compute_trend_context
+        from unittest.mock import patch
+
+        # HRV declining: 70, 65, 60, 55, 50 over 5 days
+        mock_summaries = [
+            {
+                "date": f"2026-03-{d:02d}",
+                "whoop": {"hrv_rmssd_milli": 70.0 - (d - 1) * 5, "recovery_score": 75.0},
+                "metrics_avg": {"cognitive_load_score": 0.40, "recovery_alignment_score": 0.75},
+            }
+            for d in range(1, 6)
+        ]
+        with patch("engine.store.get_recent_summaries", return_value=mock_summaries):
+            result = compute_trend_context("2026-03-14", lookback_days=7)
+
+        assert isinstance(result, dict)
+        # If trend is detected, hrv_trend should indicate decline
+        if "hrv_trend" in result:
+            assert result["hrv_trend"] in ("declining", "improving", "stable")

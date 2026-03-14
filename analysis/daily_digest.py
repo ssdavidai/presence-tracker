@@ -8,6 +8,16 @@ whether he was within physiological capacity, and one insight.
 This is the primary human-facing output of the Presence Tracker —
 the difference between data sitting in JSONL files and David actually
 knowing how his day went cognitively.
+
+v1.2 — Multi-day trend context:
+  The digest now computes a trend context from recent history (up to 7 days).
+  This detects:
+  - HRV decline or improvement streaks (3+ consecutive days)
+  - Consecutive above-capacity days (RAS < 0.45 for 3+ days)
+  - CLS vs personal baseline (today vs 7-day average)
+  - HRV vs personal baseline (today vs 7-day average)
+  The most significant trend is surfaced as the insight, replacing generic
+  single-day observations with multi-day pattern detection.
 """
 
 import json
@@ -75,6 +85,232 @@ def _fdi_label(fdi: float) -> str:
         return "fragmented"
     else:
         return "highly fragmented"
+
+
+# ─── Multi-day trend context ─────────────────────────────────────────────────
+
+def compute_trend_context(today_date: str, lookback_days: int = 7) -> dict:
+    """
+    Build a multi-day trend context from recent daily summaries.
+
+    Reads the rolling summary store and computes:
+    - hrv_trend: direction and streak of HRV change ('declining', 'improving', 'stable')
+    - hrv_streak_days: how many consecutive days HRV has been declining/improving
+    - hrv_vs_baseline: today's HRV relative to 7-day average (pct difference)
+    - cls_vs_baseline: today's CLS relative to 7-day average (pct difference)
+    - overcapacity_streak: how many consecutive days RAS was < 0.45 (over capacity)
+    - recovery_trend: 'declining', 'improving', 'stable' for recovery score streak
+    - recovery_streak_days: consecutive days of recovery decline/improvement
+    - days_of_data: how many days are in the lookback window
+    - note: human-readable summary of the most significant trend
+
+    Returns an empty dict if fewer than 2 days of history are available.
+    All computations are robust to missing values (None fields in summaries).
+    """
+    try:
+        from engine.store import get_recent_summaries
+    except ImportError:
+        return {}
+
+    # Fetch recent days, most-recent-first; skip today (not yet written)
+    all_summaries = get_recent_summaries(days=lookback_days + 1)
+
+    # Exclude today from the historical baseline
+    historical = [s for s in all_summaries if s.get("date") != today_date]
+    today_summary = next((s for s in all_summaries if s.get("date") == today_date), None)
+
+    if len(historical) < 1:
+        return {"days_of_data": 0}
+
+    # ── Helper ────────────────────────────────────────────────────────────
+    def _safe(val) -> Optional[float]:
+        try:
+            return float(val) if val is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # Build chronological list of (date, hrv, recovery, avg_cls, avg_ras)
+    # historical is most-recent-first, so reverse for chronological order
+    chrono = list(reversed(historical))
+
+    hrv_series: list[Optional[float]] = [
+        _safe(s.get("whoop", {}).get("hrv_rmssd_milli")) for s in chrono
+    ]
+    recovery_series: list[Optional[float]] = [
+        _safe(s.get("whoop", {}).get("recovery_score")) for s in chrono
+    ]
+    cls_series: list[Optional[float]] = [
+        _safe(s.get("metrics_avg", {}).get("cognitive_load_score")) for s in chrono
+    ]
+    ras_series: list[Optional[float]] = [
+        _safe(s.get("metrics_avg", {}).get("recovery_alignment_score")) for s in chrono
+    ]
+
+    # Today's values (from the window-based digest, not the rolling summary)
+    today_hrv = _safe(
+        today_summary.get("whoop", {}).get("hrv_rmssd_milli") if today_summary else None
+    )
+    today_recovery = _safe(
+        today_summary.get("whoop", {}).get("recovery_score") if today_summary else None
+    )
+    today_cls = _safe(
+        today_summary.get("metrics_avg", {}).get("cognitive_load_score") if today_summary else None
+    )
+    today_ras = _safe(
+        today_summary.get("metrics_avg", {}).get("recovery_alignment_score") if today_summary else None
+    )
+
+    # ── Streak detection ──────────────────────────────────────────────────
+    def _streak(series: list[Optional[float]], today_val: Optional[float],
+                direction: str, threshold: float = 0.02) -> int:
+        """
+        Count consecutive days (ending with today) where the value
+        moved in `direction` ('up' or 'down') by at least `threshold`.
+
+        Returns the streak length (1 = only today vs yesterday, etc.).
+        Stops on the first day where the change reversed or data is missing.
+        """
+        full = series + ([today_val] if today_val is not None else [])
+        count = 0
+        for i in range(len(full) - 1, 0, -1):
+            curr = full[i]
+            prev = full[i - 1]
+            if curr is None or prev is None:
+                break
+            delta = curr - prev
+            if direction == "down" and delta < -threshold:
+                count += 1
+            elif direction == "up" and delta > threshold:
+                count += 1
+            else:
+                break
+        return count
+
+    def _baseline(series: list[Optional[float]]) -> Optional[float]:
+        vals = [v for v in series if v is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    # ── HRV trend ─────────────────────────────────────────────────────────
+    hrv_decline_streak = _streak(hrv_series, today_hrv, "down", threshold=2.0)  # 2ms threshold
+    hrv_improve_streak = _streak(hrv_series, today_hrv, "up", threshold=2.0)
+
+    hrv_baseline = _baseline(hrv_series)
+    hrv_vs_baseline: Optional[float] = None
+    if today_hrv is not None and hrv_baseline is not None and hrv_baseline > 0:
+        hrv_vs_baseline = round((today_hrv - hrv_baseline) / hrv_baseline * 100, 1)
+
+    if hrv_decline_streak >= 2:
+        hrv_trend = "declining"
+        hrv_streak_days = hrv_decline_streak
+    elif hrv_improve_streak >= 2:
+        hrv_trend = "improving"
+        hrv_streak_days = hrv_improve_streak
+    else:
+        hrv_trend = "stable"
+        hrv_streak_days = 0
+
+    # ── Recovery trend ────────────────────────────────────────────────────
+    rec_decline_streak = _streak(recovery_series, today_recovery, "down", threshold=3.0)
+    rec_improve_streak = _streak(recovery_series, today_recovery, "up", threshold=3.0)
+
+    recovery_baseline = _baseline(recovery_series)
+    recovery_vs_baseline: Optional[float] = None
+    if today_recovery is not None and recovery_baseline is not None and recovery_baseline > 0:
+        recovery_vs_baseline = round((today_recovery - recovery_baseline) / recovery_baseline * 100, 1)
+
+    if rec_decline_streak >= 2:
+        recovery_trend = "declining"
+        recovery_streak_days = rec_decline_streak
+    elif rec_improve_streak >= 2:
+        recovery_trend = "improving"
+        recovery_streak_days = rec_improve_streak
+    else:
+        recovery_trend = "stable"
+        recovery_streak_days = 0
+
+    # ── CLS vs baseline ───────────────────────────────────────────────────
+    cls_baseline = _baseline(cls_series)
+    cls_vs_baseline: Optional[float] = None
+    if today_cls is not None and cls_baseline is not None and cls_baseline > 0:
+        cls_vs_baseline = round((today_cls - cls_baseline) / cls_baseline * 100, 1)
+
+    # ── Over-capacity streak ──────────────────────────────────────────────
+    # RAS < 0.45 = over capacity
+    overcapacity_streak = 0
+    full_ras = ras_series + ([today_ras] if today_ras is not None else [])
+    for ras_val in reversed(full_ras):
+        if ras_val is not None and ras_val < 0.45:
+            overcapacity_streak += 1
+        else:
+            break
+
+    # ── Build human note ──────────────────────────────────────────────────
+    note = ""
+
+    if hrv_trend == "declining" and hrv_streak_days >= 3:
+        note = (
+            f"HRV has declined for {hrv_streak_days} consecutive days — "
+            f"autonomic stress is accumulating. Protect recovery tonight."
+        )
+    elif hrv_trend == "declining" and hrv_streak_days == 2:
+        note = "HRV has dropped two days in a row — watch for early fatigue signs."
+
+    elif hrv_trend == "improving" and hrv_streak_days >= 3:
+        note = (
+            f"HRV has improved for {hrv_streak_days} consecutive days — "
+            f"physiological recovery is trending well."
+        )
+
+    elif overcapacity_streak >= 3:
+        note = (
+            f"{overcapacity_streak} consecutive days over physiological capacity. "
+            f"Accumulated strain — a genuine recovery day is needed."
+        )
+    elif overcapacity_streak == 2:
+        note = "Second consecutive day over capacity — monitor RAS tomorrow."
+
+    elif recovery_trend == "declining" and recovery_streak_days >= 3:
+        note = (
+            f"Recovery score has declined for {recovery_streak_days} days in a row. "
+            f"Sleep or stress management may need attention."
+        )
+
+    elif cls_vs_baseline is not None and cls_vs_baseline > 40:
+        note = (
+            f"Today's cognitive load was {cls_vs_baseline:.0f}% above your recent baseline "
+            f"({cls_baseline:.0%} avg). Higher-than-usual demand."
+        )
+    elif cls_vs_baseline is not None and cls_vs_baseline < -35:
+        note = (
+            f"Today's load was {abs(cls_vs_baseline):.0f}% below your recent baseline — "
+            f"well-paced day."
+        )
+
+    elif hrv_vs_baseline is not None and hrv_vs_baseline < -15:
+        note = (
+            f"HRV is {abs(hrv_vs_baseline):.0f}% below your recent average "
+            f"({hrv_baseline:.0f}ms baseline) — autonomic system under pressure."
+        )
+    elif hrv_vs_baseline is not None and hrv_vs_baseline > 15:
+        note = (
+            f"HRV is {hrv_vs_baseline:.0f}% above your recent average — "
+            f"strong autonomic readiness today."
+        )
+
+    return {
+        "days_of_data": len(historical),
+        "hrv_trend": hrv_trend,
+        "hrv_streak_days": hrv_streak_days,
+        "hrv_vs_baseline": hrv_vs_baseline,
+        "hrv_baseline_ms": round(hrv_baseline, 1) if hrv_baseline is not None else None,
+        "recovery_trend": recovery_trend,
+        "recovery_streak_days": recovery_streak_days,
+        "recovery_vs_baseline": recovery_vs_baseline,
+        "cls_vs_baseline": cls_vs_baseline,
+        "cls_baseline": round(cls_baseline, 3) if cls_baseline is not None else None,
+        "overcapacity_streak": overcapacity_streak,
+        "note": note,
+    }
 
 
 # ─── Digest computation ───────────────────────────────────────────────────────
@@ -154,7 +390,12 @@ def compute_digest(windows: list[dict]) -> dict:
     hrv = whoop.get("hrv_rmssd_milli")
     sleep_h = whoop.get("sleep_hours")
 
-    # Generate one key insight
+    # ── Multi-day trend context ────────────────────────────────────────────
+    # Loads recent history to detect streaks and baseline deviations.
+    # Gracefully returns {} if no history is available yet.
+    trend = compute_trend_context(date_str)
+
+    # Generate one key insight (trend-aware)
     insight = _generate_insight(
         recovery=recovery,
         avg_cls=avg_cls,
@@ -165,6 +406,7 @@ def compute_digest(windows: list[dict]) -> dict:
         peak_window=peak_window,
         working_count=len(working),
         active_count=len(active),
+        trend=trend,
     )
 
     return {
@@ -193,6 +435,7 @@ def compute_digest(windows: list[dict]) -> dict:
             "slack_received": total_received,
         },
         "peak_window": peak_window,
+        "trend": trend,
         "insight": insight,
     }
 
@@ -207,11 +450,99 @@ def _generate_insight(
     peak_window: Optional[dict],
     working_count: int,
     active_count: int,
+    trend: Optional[dict] = None,
 ) -> str:
     """
     Generate one data-driven insight for today.
-    Priority: alignment issues > focus quality > meeting load > quiet day.
+
+    Priority order:
+    1. Multi-day trend signals (streaks beat single-day observations)
+    2. Today's alignment issues (recovery vs load mismatch)
+    3. Focus fragmentation
+    4. Meeting load
+    5. Quiet day fallback
+
+    v1.2: trend parameter enables streak-based and baseline-relative insights.
+    When a significant multi-day pattern is detected, it takes precedence over
+    single-day observations because it's more actionable and less obvious.
     """
+    trend = trend or {}
+
+    # ── Tier 1: Multi-day trend signals ───────────────────────────────────
+    # Streak-based insights are the most valuable — they surface patterns
+    # that are invisible when looking at one day in isolation.
+
+    overcapacity_streak = trend.get("overcapacity_streak", 0)
+    hrv_trend = trend.get("hrv_trend", "stable")
+    hrv_streak = trend.get("hrv_streak_days", 0)
+    recovery_trend = trend.get("recovery_trend", "stable")
+    recovery_streak = trend.get("recovery_streak_days", 0)
+    cls_vs_baseline = trend.get("cls_vs_baseline")
+    hrv_vs_baseline = trend.get("hrv_vs_baseline")
+    hrv_baseline_ms = trend.get("hrv_baseline_ms")
+
+    # Longest/most concerning streak takes top priority
+    if overcapacity_streak >= 3:
+        return (
+            f"{overcapacity_streak} consecutive days over physiological capacity. "
+            f"This is accumulated strain — schedule a genuine recovery day soon."
+        )
+
+    if hrv_trend == "declining" and hrv_streak >= 3:
+        return (
+            f"HRV has declined for {hrv_streak} consecutive days — autonomic fatigue is "
+            f"building. Tonight's sleep quality is critical."
+        )
+
+    if overcapacity_streak == 2:
+        if recovery is not None and recovery < 55:
+            return (
+                f"Two days over capacity, recovery now at {recovery:.0f}%. "
+                f"Tomorrow needs to be lighter."
+            )
+
+    if hrv_trend == "declining" and hrv_streak == 2:
+        if recovery is not None and recovery < 60:
+            return (
+                f"HRV has dropped two days in a row (recovery {recovery:.0f}%). "
+                f"Consider protecting tomorrow morning."
+            )
+
+    if hrv_trend == "improving" and hrv_streak >= 3:
+        return (
+            f"HRV has improved for {hrv_streak} consecutive days — recovery trending well. "
+            f"Good conditions for a demanding day if needed."
+        )
+
+    if recovery_trend == "declining" and recovery_streak >= 3:
+        return (
+            f"Recovery score has declined {recovery_streak} days in a row. "
+            f"Check sleep consistency and evening wind-down."
+        )
+
+    # CLS vs baseline: today was notably different from normal
+    if cls_vs_baseline is not None and cls_vs_baseline > 40 and trend.get("days_of_data", 0) >= 3:
+        baseline_str = f"{trend['cls_baseline']:.0%}" if trend.get("cls_baseline") else "baseline"
+        return (
+            f"Today's cognitive load was {cls_vs_baseline:.0f}% above your recent {baseline_str} average. "
+            f"Higher than usual demand — worth monitoring recovery tomorrow."
+        )
+
+    if cls_vs_baseline is not None and cls_vs_baseline < -35 and trend.get("days_of_data", 0) >= 3:
+        return (
+            f"Today was {abs(cls_vs_baseline):.0f}% lighter than your recent average — "
+            f"good pacing relative to your baseline."
+        )
+
+    # HRV notably below baseline even if no streak
+    if (hrv_vs_baseline is not None and hrv_vs_baseline < -15
+            and hrv_baseline_ms is not None and trend.get("days_of_data", 0) >= 3):
+        return (
+            f"HRV is {abs(hrv_vs_baseline):.0f}% below your {hrv_baseline_ms:.0f}ms baseline — "
+            f"autonomic system under more pressure than usual."
+        )
+
+    # ── Tier 2: Today's alignment issues ─────────────────────────────────
     if recovery is not None and avg_cls is not None:
         if recovery < 50 and avg_cls > 0.50:
             return (
@@ -223,18 +554,20 @@ def _generate_insight(
                 f"Good self-management: recovery was low ({recovery:.0f}%) and you kept load light. "
                 f"HRV should bounce back tomorrow."
             )
-        if recovery >= 80 and avg_cls is not None and avg_cls < 0.20 and active_count < 5:
+        if recovery >= 80 and avg_cls < 0.20 and active_count < 5:
             return (
                 f"High recovery ({recovery:.0f}%) but very light cognitive load today. "
                 f"You have capacity to take on more if needed."
             )
 
+    # ── Tier 3: Focus fragmentation ───────────────────────────────────────
     if avg_fdi_active is not None and avg_fdi_active < 0.50 and active_count >= 4:
         return (
             f"Focus was fragmented during active work (FDI {avg_fdi_active:.0%}). "
             f"Try protecting at least one uninterrupted 90-minute block tomorrow."
         )
 
+    # ── Tier 4: Meeting load ──────────────────────────────────────────────
     if total_meeting_minutes >= 240:
         hours = total_meeting_minutes // 60
         return (
@@ -242,6 +575,7 @@ def _generate_insight(
             f"Heavy meeting load reduces recovery and deep work — consider blocking tomorrow morning."
         )
 
+    # ── Tier 5: Fallbacks ─────────────────────────────────────────────────
     if active_count == 0:
         return "No significant cognitive activity detected today — rest day or data gap."
 
@@ -350,6 +684,36 @@ def format_digest_message(digest: dict) -> str:
         lines.append("_" + "  ·  ".join(activity_parts) + "_")
     else:
         lines.append("_No significant activity detected_")
+
+    # ── Trend indicator (multi-day pattern, if detected) ──
+    trend = digest.get("trend", {})
+    if trend:
+        trend_parts = []
+        hrv_trend = trend.get("hrv_trend", "stable")
+        hrv_streak = trend.get("hrv_streak_days", 0)
+        overcapacity = trend.get("overcapacity_streak", 0)
+        hrv_vs_baseline = trend.get("hrv_vs_baseline")
+        cls_vs_baseline = trend.get("cls_vs_baseline")
+
+        if hrv_trend == "declining" and hrv_streak >= 2:
+            trend_parts.append(f"HRV ↓ {hrv_streak}d")
+        elif hrv_trend == "improving" and hrv_streak >= 2:
+            trend_parts.append(f"HRV ↑ {hrv_streak}d")
+
+        if overcapacity >= 2:
+            trend_parts.append(f"over-capacity {overcapacity}d")
+
+        if hrv_vs_baseline is not None and abs(hrv_vs_baseline) >= 10:
+            sign = "+" if hrv_vs_baseline > 0 else ""
+            trend_parts.append(f"HRV {sign}{hrv_vs_baseline:.0f}% vs baseline")
+
+        if cls_vs_baseline is not None and abs(cls_vs_baseline) >= 25:
+            sign = "+" if cls_vs_baseline > 0 else ""
+            trend_parts.append(f"Load {sign}{cls_vs_baseline:.0f}% vs baseline")
+
+        if trend_parts:
+            lines.append("")
+            lines.append("_Trends: " + "  ·  ".join(trend_parts) + "_")
 
     # ── Insight ──
     if insight:
