@@ -39,6 +39,30 @@ v1.3 — Hourly CLS sparkline:
   - Both are pure functions with no external dependencies, fully testable
   - The sparkline is added to the digest dict as "hourly_cls_curve" and
     rendered in format_digest_message() as a single compact line
+
+v1.6 — Omi conversation digest + peak focus hour:
+  The digest now surfaces two previously invisible signals:
+
+  1. Omi conversation activity — Omi ambient audio data has been wired into
+     CLS, SDI, and FDI since v2.0, but never shown explicitly in the message.
+     David could see its effect on metrics but not the cause.  Now when Omi
+     detects speech on a given day the digest shows:
+       - Session count (how many distinct conversations)
+       - Total words spoken (engagement depth proxy)
+       - Total speaking time in minutes
+     Example: "🎙 3 conversations  ·  847 words  ·  14 min speaking"
+     Shown only when at least one Omi conversation was detected.
+
+  2. Peak focus hour — the working hour with the highest active FDI is now
+     surfaced when it's above a meaningful threshold (≥ 0.70).  This answers
+     "when am I most focused?" and can inform future scheduling.
+     Example: "🏆 Best focus: 09:00–10:00 (FDI 84%)"
+     Computed from active working-hour windows (same as active_fdi).
+     Only shown when at least one active window exists and peak FDI ≥ 0.70.
+
+  Both additions use data already collected — no new API calls or collectors.
+  Both degrade gracefully: if Omi has no data, the section is omitted;
+  if no active windows exist, the peak focus line is omitted.
 """
 
 import json
@@ -496,6 +520,57 @@ def compute_digest(windows: list[dict]) -> dict:
     hrv = whoop.get("hrv_rmssd_milli")
     sleep_h = whoop.get("sleep_hours")
 
+    # ── Omi conversation stats (v1.6) ─────────────────────────────────────
+    # Aggregate spoken-conversation activity from working-hour windows.
+    # Omi signals have been wired into CLS/SDI/FDI since v2.0, but were never
+    # surfaced explicitly in the digest.  This shows David what drove those
+    # metric shifts — how many conversations he had, how many words he spoke,
+    # and how long he was actively talking.
+    # Only populated when at least one Omi conversation was detected.
+    omi_active_windows = [
+        w for w in working
+        if (w.get("omi") or {}).get("conversation_active", False)
+    ]
+
+    if omi_active_windows:
+        omi_total_words = sum(
+            (w.get("omi") or {}).get("word_count", 0) for w in omi_active_windows
+        )
+        omi_total_speech_secs = sum(
+            (w.get("omi") or {}).get("speech_seconds", 0.0) for w in omi_active_windows
+        )
+        omi_total_sessions = sum(
+            (w.get("omi") or {}).get("sessions_count", 0) for w in omi_active_windows
+        )
+        omi_digest: Optional[dict] = {
+            "conversation_windows": len(omi_active_windows),
+            "total_sessions": omi_total_sessions,
+            "total_words": omi_total_words,
+            "total_speech_minutes": round(omi_total_speech_secs / 60.0, 1),
+        }
+    else:
+        omi_digest = None
+
+    # ── Peak focus hour (v1.6) ─────────────────────────────────────────────
+    # Find the working hour with the highest average active FDI.
+    # Only considers active windows (meeting or Slack activity present) so that
+    # idle hours (trivially FDI=1.0) don't crowd out genuinely productive periods.
+    # Shows David when they're sharpest, useful for scheduling high-demand work.
+    peak_focus_hour: Optional[int] = None
+    peak_focus_fdi: Optional[float] = None
+    if active:
+        from collections import defaultdict as _defaultdict
+        hour_fdi_vals: dict[int, list[float]] = _defaultdict(list)
+        for w in active:
+            hour_fdi_vals[w["metadata"]["hour_of_day"]].append(
+                w["metrics"]["focus_depth_index"]
+            )
+        for h, vals in hour_fdi_vals.items():
+            h_avg = sum(vals) / len(vals)
+            if peak_focus_fdi is None or h_avg > peak_focus_fdi:
+                peak_focus_fdi = round(h_avg, 4)
+                peak_focus_hour = h
+
     # ── RescueTime stats (v1.5) ───────────────────────────────────────────
     # Aggregate focus/distraction computer time from working-hour windows.
     # Only populated when RescueTime data is actually present in the windows.
@@ -589,6 +664,11 @@ def compute_digest(windows: list[dict]) -> dict:
         "hourly_cls_curve": hourly_cls_curve,
         # v1.5: RescueTime computer-time breakdown (None when RT not configured)
         "rescuetime": rescuetime_digest,
+        # v1.6: Omi conversation activity (None when no Omi data for the day)
+        "omi": omi_digest,
+        # v1.6: Peak focus hour (None when no active windows or FDI < threshold)
+        "peak_focus_hour": peak_focus_hour,
+        "peak_focus_fdi": peak_focus_fdi,
     }
 
 
@@ -776,6 +856,9 @@ def format_digest_message(digest: dict) -> str:
     insight = digest.get("insight", "")
     hourly_cls_curve = digest.get("hourly_cls_curve")
     rescuetime = digest.get("rescuetime")  # None when RT not configured
+    omi = digest.get("omi")               # None when no Omi conversations (v1.6)
+    peak_focus_hour = digest.get("peak_focus_hour")   # v1.6
+    peak_focus_fdi = digest.get("peak_focus_fdi")     # v1.6
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -871,6 +954,41 @@ def format_digest_message(digest: dict) -> str:
 
         if rt_parts:
             lines.append("_💻 " + "  ·  ".join(rt_parts) + "_")
+
+    # ── Omi conversation activity (v1.6) ──────────────────────────────────
+    # Show spoken conversation stats when Omi detected activity.
+    # This surfaces the signal that's been affecting CLS/SDI/FDI since v2.0
+    # but was never explicitly shown.  Sessions = distinct voice conversations.
+    # Only shown when at least one conversation was detected today.
+    if omi:
+        omi_sessions = omi.get("total_sessions", 0)
+        omi_words = omi.get("total_words", 0)
+        omi_speech_min = omi.get("total_speech_minutes", 0.0)
+
+        omi_parts = []
+        if omi_sessions > 0:
+            omi_parts.append(
+                f"{omi_sessions} conversation{'s' if omi_sessions != 1 else ''}"
+            )
+        if omi_words > 0:
+            omi_parts.append(f"{omi_words:,} words")
+        if omi_speech_min > 0:
+            omi_parts.append(f"{omi_speech_min:.0f} min speaking")
+
+        if omi_parts:
+            lines.append("_🎙 " + "  ·  ".join(omi_parts) + "_")
+
+    # ── Peak focus hour (v1.6) ─────────────────────────────────────────────
+    # Surface the single best focus hour of the day — useful for scheduling.
+    # Only shown when there was meaningful focused work (FDI ≥ 0.70 peak).
+    # Threshold avoids showing a peak when the whole day was fragmented.
+    _PEAK_FOCUS_THRESHOLD = 0.70
+    if peak_focus_hour is not None and peak_focus_fdi is not None and peak_focus_fdi >= _PEAK_FOCUS_THRESHOLD:
+        end_hour = peak_focus_hour + 1
+        lines.append(
+            f"_🏆 Best focus: {peak_focus_hour:02d}:00–{end_hour:02d}:00 "
+            f"(FDI {peak_focus_fdi:.0%})_"
+        )
 
     # ── Trend indicator (multi-day pattern, if detected) ──
     trend = digest.get("trend", {})

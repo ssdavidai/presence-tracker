@@ -919,3 +919,306 @@ class TestHourlyCLSInDigest:
         result = format_digest_message(minimal_digest)
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+# ─── Omi conversation digest tests (v1.6) ────────────────────────────────────
+
+def _make_omi_windows(date_str: str = "2026-03-13", omi_by_window: dict = None):
+    """
+    Build windows with Omi data injected for specific window indices.
+
+    omi_by_window: dict of window_index → omi signal dict
+    (conversation_active, word_count, speech_seconds, sessions_count, speech_ratio)
+    """
+    from engine.chunker import build_windows
+    windows = build_windows(
+        date_str=date_str,
+        whoop_data=SAMPLE_WHOOP,
+        calendar_data=SAMPLE_CALENDAR_EMPTY,
+        slack_windows={},
+        omi_windows=omi_by_window or {},
+    )
+    return windows
+
+
+class TestOmiDigest:
+    """Tests for Omi conversation aggregation in compute_digest (v1.6)."""
+
+    def test_no_omi_data_returns_none(self):
+        """When there is no Omi data in windows, omi field should be None."""
+        windows = _make_omi_windows(omi_by_window={})
+        digest = compute_digest(windows)
+        assert digest.get("omi") is None
+
+    def test_omi_data_present_returns_dict(self):
+        """When Omi data is present, omi field should be a non-empty dict."""
+        omi_windows = {
+            36: {  # 9am window
+                "conversation_active": True,
+                "word_count": 300,
+                "speech_seconds": 240.0,
+                "audio_seconds": 360.0,
+                "sessions_count": 1,
+                "speech_ratio": 0.67,
+            }
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        assert digest.get("omi") is not None
+        assert isinstance(digest["omi"], dict)
+
+    def test_omi_session_count_aggregated(self):
+        """Total sessions should sum sessions_count across all omi-active windows."""
+        omi_windows = {
+            36: {"conversation_active": True, "word_count": 200, "speech_seconds": 120.0,
+                 "audio_seconds": 180.0, "sessions_count": 2, "speech_ratio": 0.67},
+            44: {"conversation_active": True, "word_count": 150, "speech_seconds": 90.0,
+                 "audio_seconds": 150.0, "sessions_count": 1, "speech_ratio": 0.60},
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        omi = digest["omi"]
+        assert omi["total_sessions"] == 3  # 2 + 1
+
+    def test_omi_word_count_aggregated(self):
+        """Total words should sum across all omi-active working-hour windows."""
+        omi_windows = {
+            36: {"conversation_active": True, "word_count": 250, "speech_seconds": 150.0,
+                 "audio_seconds": 220.0, "sessions_count": 1, "speech_ratio": 0.68},
+            52: {"conversation_active": True, "word_count": 400, "speech_seconds": 280.0,
+                 "audio_seconds": 360.0, "sessions_count": 1, "speech_ratio": 0.78},
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        assert digest["omi"]["total_words"] == 650
+
+    def test_omi_speech_minutes_computed(self):
+        """Total speech minutes = sum of speech_seconds / 60, rounded to 1 dp."""
+        omi_windows = {
+            36: {"conversation_active": True, "word_count": 300, "speech_seconds": 180.0,
+                 "audio_seconds": 250.0, "sessions_count": 1, "speech_ratio": 0.72},
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        expected_min = round(180.0 / 60.0, 1)
+        assert digest["omi"]["total_speech_minutes"] == expected_min
+
+    def test_omi_non_working_hours_excluded(self):
+        """Omi data outside working hours should not be included in the digest."""
+        # Window 0 = midnight (non-working), window 36 = 9am (working)
+        omi_windows = {
+            0: {"conversation_active": True, "word_count": 500, "speech_seconds": 300.0,
+                "audio_seconds": 450.0, "sessions_count": 2, "speech_ratio": 0.67},
+            36: {"conversation_active": True, "word_count": 100, "speech_seconds": 60.0,
+                 "audio_seconds": 90.0, "sessions_count": 1, "speech_ratio": 0.67},
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        # Only window 36 (working hours) should be counted
+        assert digest["omi"]["total_words"] == 100
+        assert digest["omi"]["total_sessions"] == 1
+
+    def test_omi_digest_has_required_keys(self):
+        """Omi digest dict must contain expected keys."""
+        omi_windows = {
+            36: {"conversation_active": True, "word_count": 200, "speech_seconds": 120.0,
+                 "audio_seconds": 180.0, "sessions_count": 1, "speech_ratio": 0.67},
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        omi = digest["omi"]
+        assert "conversation_windows" in omi
+        assert "total_sessions" in omi
+        assert "total_words" in omi
+        assert "total_speech_minutes" in omi
+
+    def test_omi_conversation_windows_count(self):
+        """conversation_windows = number of working windows with conversation_active=True."""
+        omi_windows = {
+            36: {"conversation_active": True, "word_count": 200, "speech_seconds": 120.0,
+                 "audio_seconds": 180.0, "sessions_count": 1, "speech_ratio": 0.67},
+            44: {"conversation_active": True, "word_count": 150, "speech_seconds": 90.0,
+                 "audio_seconds": 130.0, "sessions_count": 1, "speech_ratio": 0.69},
+            52: {"conversation_active": False, "word_count": 0, "speech_seconds": 0.0,
+                 "audio_seconds": 0.0, "sessions_count": 0, "speech_ratio": 0.0},
+        }
+        windows = _make_omi_windows(omi_by_window=omi_windows)
+        digest = compute_digest(windows)
+        # 2 windows have conversation_active=True, 1 doesn't
+        assert digest["omi"]["conversation_windows"] == 2
+
+
+class TestOmiFormatDigestMessage:
+    """Tests for Omi section rendering in format_digest_message (v1.6)."""
+
+    def _minimal_digest(self, omi=None, peak_focus_hour=None, peak_focus_fdi=None):
+        """Build a minimal digest dict, optionally with Omi + peak focus data."""
+        return {
+            "date": "2026-03-14",
+            "whoop": {"recovery_score": 75.0, "hrv_rmssd_milli": 65.0, "sleep_hours": 7.5},
+            "metrics": {
+                "avg_cls": 0.25, "peak_cls": 0.45, "avg_fdi_active": 0.72, "avg_ras": 0.78,
+            },
+            "activity": {
+                "working_windows": 60, "active_windows": 10, "idle_windows": 50,
+                "total_meeting_minutes": 60, "meeting_count": 2,
+                "slack_sent": 5, "slack_received": 20,
+            },
+            "peak_window": None,
+            "trend": {},
+            "insight": "Test insight.",
+            "hourly_cls_curve": None,
+            "rescuetime": None,
+            "omi": omi,
+            "peak_focus_hour": peak_focus_hour,
+            "peak_focus_fdi": peak_focus_fdi,
+        }
+
+    def test_no_omi_no_omi_section(self):
+        """When omi is None, no 🎙 line should appear in the message."""
+        msg = format_digest_message(self._minimal_digest(omi=None))
+        assert "🎙" not in msg
+
+    def test_omi_section_shown_when_present(self):
+        """When omi data is present, 🎙 line should appear."""
+        omi = {"conversation_windows": 2, "total_sessions": 3, "total_words": 450, "total_speech_minutes": 12.0}
+        msg = format_digest_message(self._minimal_digest(omi=omi))
+        assert "🎙" in msg
+
+    def test_omi_session_count_in_message(self):
+        """Session count should be shown in the Omi line."""
+        omi = {"conversation_windows": 1, "total_sessions": 2, "total_words": 300, "total_speech_minutes": 8.0}
+        msg = format_digest_message(self._minimal_digest(omi=omi))
+        assert "2 conversations" in msg
+
+    def test_omi_word_count_in_message(self):
+        """Word count should appear in the Omi line."""
+        omi = {"conversation_windows": 1, "total_sessions": 1, "total_words": 847, "total_speech_minutes": 14.0}
+        msg = format_digest_message(self._minimal_digest(omi=omi))
+        assert "847" in msg
+
+    def test_omi_speech_minutes_in_message(self):
+        """Speaking time should appear in the Omi line."""
+        omi = {"conversation_windows": 1, "total_sessions": 1, "total_words": 200, "total_speech_minutes": 7.0}
+        msg = format_digest_message(self._minimal_digest(omi=omi))
+        assert "7" in msg and "min" in msg
+
+    def test_omi_single_conversation_grammar(self):
+        """Single conversation should use singular 'conversation', not 'conversations'."""
+        omi = {"conversation_windows": 1, "total_sessions": 1, "total_words": 100, "total_speech_minutes": 3.0}
+        msg = format_digest_message(self._minimal_digest(omi=omi))
+        assert "1 conversation" in msg
+        assert "1 conversations" not in msg
+
+    def test_no_peak_focus_line_when_none(self):
+        """When peak_focus_hour is None, no 🏆 line should appear."""
+        msg = format_digest_message(self._minimal_digest())
+        assert "🏆" not in msg
+
+    def test_no_peak_focus_line_when_below_threshold(self):
+        """When peak FDI is below 0.70, the 🏆 line should not appear."""
+        msg = format_digest_message(self._minimal_digest(peak_focus_hour=9, peak_focus_fdi=0.55))
+        assert "🏆" not in msg
+
+    def test_peak_focus_line_shown_above_threshold(self):
+        """When peak FDI is ≥ 0.70, the 🏆 line should appear."""
+        msg = format_digest_message(self._minimal_digest(peak_focus_hour=9, peak_focus_fdi=0.84))
+        assert "🏆" in msg
+
+    def test_peak_focus_shows_hour_range(self):
+        """Peak focus line should show 'HH:00–HH+1:00' format."""
+        msg = format_digest_message(self._minimal_digest(peak_focus_hour=9, peak_focus_fdi=0.84))
+        assert "09:00–10:00" in msg
+
+    def test_peak_focus_shows_fdi_percentage(self):
+        """Peak focus line should show FDI as a percentage."""
+        msg = format_digest_message(self._minimal_digest(peak_focus_hour=9, peak_focus_fdi=0.84))
+        assert "84%" in msg
+
+    def test_peak_focus_at_threshold_boundary(self):
+        """At exactly 0.70 FDI, the peak focus line should appear."""
+        msg = format_digest_message(self._minimal_digest(peak_focus_hour=14, peak_focus_fdi=0.70))
+        assert "🏆" in msg
+        assert "14:00–15:00" in msg
+
+    def test_no_crash_when_omi_missing_from_digest(self):
+        """format_digest_message should handle digests without omi key."""
+        digest = self._minimal_digest()
+        del digest["omi"]  # remove the key entirely
+        result = format_digest_message(digest)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_no_crash_when_peak_focus_keys_missing(self):
+        """format_digest_message should handle digests without peak_focus_hour/fdi keys."""
+        digest = self._minimal_digest()
+        del digest["peak_focus_hour"]
+        del digest["peak_focus_fdi"]
+        result = format_digest_message(digest)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+class TestPeakFocusHourInComputeDigest:
+    """Tests for peak focus hour computation in compute_digest (v1.6)."""
+
+    def test_no_active_windows_peak_focus_none(self):
+        """When there are no active working windows, peak_focus_hour should be None."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        assert digest["peak_focus_hour"] is None
+        assert digest["peak_focus_fdi"] is None
+
+    def test_active_windows_produce_peak_focus(self):
+        """When there are active windows, peak_focus_hour should be set."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows=make_slack_windows_active(),
+        )
+        digest = compute_digest(windows)
+        # Active windows exist, so peak_focus_hour should be set
+        assert digest["peak_focus_hour"] is not None
+        assert digest["peak_focus_fdi"] is not None
+
+    def test_peak_focus_hour_is_valid_working_hour(self):
+        """Peak focus hour must be in the working hours range (7–21)."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows=make_slack_windows_active(),
+        )
+        digest = compute_digest(windows)
+        if digest["peak_focus_hour"] is not None:
+            assert 7 <= digest["peak_focus_hour"] < 22
+
+    def test_peak_focus_fdi_is_in_range(self):
+        """Peak focus FDI must be in [0, 1]."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows=make_slack_windows_active(),
+        )
+        digest = compute_digest(windows)
+        if digest["peak_focus_fdi"] is not None:
+            assert 0.0 <= digest["peak_focus_fdi"] <= 1.0
+
+    def test_peak_focus_keys_in_digest(self):
+        """compute_digest should always include peak_focus_hour and peak_focus_fdi keys."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        assert "peak_focus_hour" in digest
+        assert "peak_focus_fdi" in digest
