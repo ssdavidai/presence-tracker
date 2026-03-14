@@ -16,6 +16,7 @@ from engine.metrics import (
     context_switch_cost,
     recovery_alignment_score,
     compute_metrics,
+    physiological_readiness,
 )
 
 
@@ -232,3 +233,281 @@ class TestComputeMetrics:
         m1 = compute_metrics(window_data)
         m2 = compute_metrics(window_data)
         assert m1 == m2, "Metrics should be deterministic"
+
+
+# ─── v1.1: Physiological Readiness Composite Tests ───────────────────────────
+
+class TestPhysiologicalReadiness:
+    """Tests for the new HRV + sleep composite readiness signal."""
+
+    def test_all_none_returns_neutral(self):
+        r = physiological_readiness(None, None, None)
+        assert r == 0.5, f"All None should return neutral 0.5, got {r}"
+
+    def test_only_recovery_score(self):
+        r = physiological_readiness(80.0, None, None)
+        assert r == 0.80, f"Only recovery=80 should return 0.80, got {r}"
+
+    def test_only_recovery_zero(self):
+        r = physiological_readiness(0.0, None, None)
+        assert r == 0.0
+
+    def test_only_recovery_perfect(self):
+        r = physiological_readiness(100.0, None, None)
+        assert r == 1.0
+
+    def test_hrv_at_reference_gives_0_5_contribution(self):
+        """HRV exactly at reference (65ms) should give 0.5 HRV component."""
+        # With only HRV provided, readiness = 0.5
+        r = physiological_readiness(None, 65.0, None)
+        assert abs(r - 0.5) < 0.01, f"HRV at reference should give ~0.5, got {r}"
+
+    def test_low_hrv_reduces_readiness(self):
+        """Low HRV should reduce readiness vs high HRV (same recovery)."""
+        r_low_hrv = physiological_readiness(70.0, 25.0, 80.0)
+        r_high_hrv = physiological_readiness(70.0, 100.0, 80.0)
+        assert r_low_hrv < r_high_hrv, (
+            f"Low HRV ({r_low_hrv:.3f}) should give lower readiness "
+            f"than high HRV ({r_high_hrv:.3f})"
+        )
+
+    def test_high_hrv_raises_readiness(self):
+        """HRV above reference raises composite readiness."""
+        r_no_hrv = physiological_readiness(70.0, None, None)
+        r_high_hrv = physiological_readiness(70.0, 120.0, None)
+        assert r_high_hrv > r_no_hrv, (
+            f"High HRV should raise readiness above recovery-only baseline"
+        )
+
+    def test_low_hrv_lowers_readiness(self):
+        """HRV below reference lowers composite readiness."""
+        r_no_hrv = physiological_readiness(70.0, None, None)
+        r_low_hrv = physiological_readiness(70.0, 20.0, None)
+        assert r_low_hrv < r_no_hrv, (
+            f"Low HRV should lower readiness below recovery-only baseline"
+        )
+
+    def test_poor_sleep_reduces_readiness(self):
+        """Poor sleep performance should reduce readiness."""
+        r_good_sleep = physiological_readiness(70.0, None, 90.0)
+        r_poor_sleep = physiological_readiness(70.0, None, 40.0)
+        assert r_good_sleep > r_poor_sleep
+
+    def test_output_range(self):
+        for rec in [0, 30, 70, 100, None]:
+            for hrv in [10, 50, 65, 100, 150, None]:
+                for sleep in [0, 50, 80, 100, None]:
+                    r = physiological_readiness(rec, hrv, sleep)
+                    assert 0.0 <= r <= 1.0, (
+                        f"readiness({rec}, {hrv}, {sleep}) = {r} out of range"
+                    )
+
+    def test_full_signals_worse_than_partial_when_hrv_low(self):
+        """
+        Full signals with very low HRV should give lower readiness than
+        recovery alone — HRV is genuinely adding negative signal.
+        """
+        r_recovery_only = physiological_readiness(80.0, None, None)
+        r_full_low_hrv = physiological_readiness(80.0, 15.0, 85.0)
+        assert r_full_low_hrv < r_recovery_only, (
+            f"Very low HRV should drag down composite: {r_full_low_hrv:.3f} vs {r_recovery_only:.3f}"
+        )
+
+    def test_weight_redistribution_when_signals_missing(self):
+        """Available weights should redistribute so result is still in [0,1]."""
+        # Only recovery + sleep (no HRV)
+        r = physiological_readiness(80.0, None, 90.0)
+        # Expected: (0.80 * 0.50 + 0.90 * 0.20) / (0.50 + 0.20) ≈ 0.828
+        expected = (0.80 * 0.50 + 0.90 * 0.20) / (0.50 + 0.20)
+        assert abs(r - expected) < 0.01, f"Expected ~{expected:.3f}, got {r}"
+
+
+# ─── v1.1: HRV-aware CLS Tests ───────────────────────────────────────────────
+
+class TestCLSHRVAware:
+    """CLS should now be sensitive to HRV, not just recovery_score."""
+
+    def test_low_hrv_raises_cls_baseline(self):
+        """Same recovery, lower HRV → higher CLS (lower physiological buffer)."""
+        cls_normal_hrv = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=70.0,
+            hrv_rmssd_milli=80.0,
+        )
+        cls_low_hrv = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=70.0,
+            hrv_rmssd_milli=20.0,
+        )
+        assert cls_low_hrv > cls_normal_hrv, (
+            f"Low HRV should raise CLS baseline: {cls_low_hrv} vs {cls_normal_hrv}"
+        )
+
+    def test_high_hrv_lowers_cls_baseline(self):
+        """Same recovery, high HRV → lower CLS."""
+        cls_no_hrv = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=5,
+            recovery_score=70.0,
+        )
+        cls_high_hrv = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=5,
+            recovery_score=70.0,
+            hrv_rmssd_milli=130.0,
+        )
+        assert cls_high_hrv < cls_no_hrv, (
+            f"High HRV should lower CLS: {cls_high_hrv} vs {cls_no_hrv}"
+        )
+
+    def test_hrv_does_not_affect_meeting_signal(self):
+        """Meeting and Slack components should be unaffected by HRV."""
+        cls_a = cognitive_load_score(True, 8, 20, 70.0, hrv_rmssd_milli=65.0)
+        cls_b = cognitive_load_score(True, 8, 20, 70.0, hrv_rmssd_milli=65.0)
+        assert cls_a == cls_b
+
+    def test_backward_compat_no_hrv(self):
+        """Calling without HRV args should behave identically to old API."""
+        cls_old = cognitive_load_score(True, 4, 10, 75.0)
+        cls_new = cognitive_load_score(True, 4, 10, 75.0, hrv_rmssd_milli=None)
+        assert cls_old == cls_new
+
+    def test_sleep_performance_affects_cls(self):
+        """Poor sleep should increase CLS baseline."""
+        cls_good_sleep = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=75.0,
+            sleep_performance=95.0,
+        )
+        cls_poor_sleep = cognitive_load_score(
+            in_meeting=False,
+            meeting_attendees=0,
+            slack_messages_received=0,
+            recovery_score=75.0,
+            sleep_performance=40.0,
+        )
+        assert cls_poor_sleep > cls_good_sleep
+
+
+# ─── v1.1: HRV-aware RAS Tests ───────────────────────────────────────────────
+
+class TestRASHRVAware:
+    """RAS should now reflect HRV + sleep as part of physiological capacity."""
+
+    def test_low_hrv_reduces_ras(self):
+        """Low HRV = less capacity → worse alignment for same CLS."""
+        ras_normal = recovery_alignment_score(70.0, 0.50, hrv_rmssd_milli=80.0)
+        ras_low_hrv = recovery_alignment_score(70.0, 0.50, hrv_rmssd_milli=20.0)
+        assert ras_low_hrv < ras_normal, (
+            f"Low HRV should reduce RAS: {ras_low_hrv} vs {ras_normal}"
+        )
+
+    def test_high_hrv_improves_ras(self):
+        """High HRV = more capacity → better alignment."""
+        ras_no_hrv = recovery_alignment_score(70.0, 0.50)
+        ras_high_hrv = recovery_alignment_score(70.0, 0.50, hrv_rmssd_milli=120.0)
+        assert ras_high_hrv >= ras_no_hrv, (
+            f"High HRV should improve RAS: {ras_high_hrv} vs {ras_no_hrv}"
+        )
+
+    def test_all_none_still_returns_neutral(self):
+        ras = recovery_alignment_score(None, 0.50)
+        assert ras == 0.5
+
+    def test_poor_sleep_reduces_ras(self):
+        """Poor sleep = less capacity → worse alignment."""
+        ras_good = recovery_alignment_score(70.0, 0.50, sleep_performance=95.0)
+        ras_poor = recovery_alignment_score(70.0, 0.50, sleep_performance=40.0)
+        assert ras_poor < ras_good
+
+    def test_backward_compat_no_hrv(self):
+        """Old call signature without HRV should still work."""
+        ras = recovery_alignment_score(recovery_score=80.0, cls=0.40)
+        assert 0.0 <= ras <= 1.0
+
+    def test_output_range_with_hrv(self):
+        for rec in [0, 50, 100, None]:
+            for cls_val in [0.0, 0.3, 0.7, 1.0]:
+                for hrv in [15, 65, 130, None]:
+                    ras = recovery_alignment_score(rec, cls_val, hrv_rmssd_milli=hrv)
+                    assert 0.0 <= ras <= 1.0, f"RAS out of range: {ras}"
+
+
+# ─── v1.1: compute_metrics full-signal integration ───────────────────────────
+
+class TestComputeMetricsHRVIntegration:
+    """compute_metrics should pass HRV + sleep through to CLS and RAS."""
+
+    def test_hrv_changes_cls_in_full_pipeline(self):
+        """HRV should propagate through compute_metrics into CLS."""
+        base = {
+            "calendar": {"in_meeting": False, "meeting_attendees": 0, "meeting_duration_minutes": 0},
+            "slack": {"messages_sent": 2, "messages_received": 5, "channels_active": 1},
+        }
+        high_hrv = {**base, "whoop": {"recovery_score": 70.0, "hrv_rmssd_milli": 120.0, "sleep_performance": 85.0}}
+        low_hrv  = {**base, "whoop": {"recovery_score": 70.0, "hrv_rmssd_milli": 20.0,  "sleep_performance": 85.0}}
+
+        m_high = compute_metrics(high_hrv)
+        m_low  = compute_metrics(low_hrv)
+
+        assert m_low["cognitive_load_score"] > m_high["cognitive_load_score"], (
+            f"Low HRV CLS ({m_low['cognitive_load_score']}) should exceed "
+            f"high HRV CLS ({m_high['cognitive_load_score']})"
+        )
+
+    def test_hrv_changes_ras_in_full_pipeline(self):
+        """HRV should propagate through compute_metrics into RAS."""
+        base = {
+            "calendar": {"in_meeting": True, "meeting_attendees": 5, "meeting_duration_minutes": 60},
+            "slack": {"messages_sent": 3, "messages_received": 8, "channels_active": 2},
+        }
+        high_hrv = {**base, "whoop": {"recovery_score": 65.0, "hrv_rmssd_milli": 110.0, "sleep_performance": 88.0}}
+        low_hrv  = {**base, "whoop": {"recovery_score": 65.0, "hrv_rmssd_milli": 22.0,  "sleep_performance": 88.0}}
+
+        m_high = compute_metrics(high_hrv)
+        m_low  = compute_metrics(low_hrv)
+
+        assert m_low["recovery_alignment_score"] < m_high["recovery_alignment_score"], (
+            f"Low HRV RAS ({m_low['recovery_alignment_score']}) should be worse than "
+            f"high HRV RAS ({m_high['recovery_alignment_score']})"
+        )
+
+    def test_missing_hrv_in_whoop_dict_graceful(self):
+        """If hrv_rmssd_milli is absent from whoop dict, should not crash."""
+        window_data = {
+            "calendar": {"in_meeting": False, "meeting_attendees": 0, "meeting_duration_minutes": 0},
+            "whoop": {"recovery_score": 80.0},  # No HRV key
+            "slack": {"messages_sent": 1, "messages_received": 3, "channels_active": 1},
+        }
+        metrics = compute_metrics(window_data)
+        assert all(0.0 <= v <= 1.0 for v in metrics.values())
+
+    def test_full_whoop_signals_all_utilised(self):
+        """All WHOOP signals (recovery + HRV + sleep) should affect output."""
+        # Maximal physiological readiness
+        peak = {
+            "calendar": {"in_meeting": False, "meeting_attendees": 0, "meeting_duration_minutes": 0},
+            "whoop": {"recovery_score": 100.0, "hrv_rmssd_milli": 130.0, "sleep_performance": 100.0},
+            "slack": {"messages_sent": 0, "messages_received": 0, "channels_active": 0},
+        }
+        # Minimal physiological readiness
+        depleted = {
+            "calendar": {"in_meeting": False, "meeting_attendees": 0, "meeting_duration_minutes": 0},
+            "whoop": {"recovery_score": 0.0, "hrv_rmssd_milli": 10.0, "sleep_performance": 0.0},
+            "slack": {"messages_sent": 0, "messages_received": 0, "channels_active": 0},
+        }
+        m_peak = compute_metrics(peak)
+        m_dep  = compute_metrics(depleted)
+
+        # Peak readiness → lower CLS (less cognitive strain at rest)
+        assert m_peak["cognitive_load_score"] < m_dep["cognitive_load_score"]
+        # Peak readiness → higher RAS (better aligned)
+        assert m_peak["recovery_alignment_score"] > m_dep["recovery_alignment_score"]

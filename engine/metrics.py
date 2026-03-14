@@ -9,6 +9,13 @@ Computes the 5 derived metrics for each 15-minute observation window:
 - Recovery Alignment Score (RAS)
 
 All metrics are normalized to [0.0, 1.0].
+
+v1.1 — HRV-aware physiological composite:
+  HRV (rmssd) and sleep_performance are now incorporated into the
+  physiological readiness signal used by CLS and RAS.  Previously only
+  recovery_score was considered; low HRV (autonomic stress marker) and
+  poor sleep now correctly raise the perceived cognitive load baseline
+  and reduce the physiological capacity available for work.
 """
 
 from typing import Optional
@@ -28,6 +35,70 @@ def _norm(val: Optional[float], max_val: float, min_val: float = 0.0) -> float:
     return _clamp((val - min_val) / (max_val - min_val))
 
 
+# ─── Physiological readiness composite ───────────────────────────────────────
+
+# Reference HRV: population median for a healthy adult.
+# Values below this indicate autonomic stress; above indicate readiness.
+_HRV_REFERENCE_MS = 65.0
+
+# HRV saturation point: at this value (or above) HRV contributes its maximum
+# positive signal.  Prevents extreme outliers from dominating.
+_HRV_SATURATION_MS = 130.0
+
+# Weights for the composite readiness score
+_READINESS_W_RECOVERY = 0.50   # WHOOP recovery score (already composite)
+_READINESS_W_HRV = 0.30        # HRV RMSSD — real-time autonomic state
+_READINESS_W_SLEEP = 0.20      # Sleep performance — substrate for the day
+
+
+def physiological_readiness(
+    recovery_score: Optional[float],
+    hrv_rmssd_milli: Optional[float] = None,
+    sleep_performance: Optional[float] = None,
+) -> float:
+    """
+    Composite physiological readiness score — 0.0 (depleted) to 1.0 (peak).
+
+    Blends three WHOOP signals:
+    - recovery_score (0–100): WHOOP's own composite readiness
+    - hrv_rmssd_milli: heart-rate variability; low HRV = autonomic stress
+    - sleep_performance (0–100): how well the previous sleep prepared the body
+
+    When individual signals are missing the weight is redistributed to
+    available signals.  If all signals are None, returns 0.5 (neutral).
+
+    This composite is used as the physiological capacity signal in CLS and RAS.
+    """
+    components: list[tuple[float, float]] = []  # (value_0_to_1, weight)
+
+    if recovery_score is not None:
+        components.append((recovery_score / 100.0, _READINESS_W_RECOVERY))
+
+    if hrv_rmssd_milli is not None:
+        # Normalize HRV: 0 at 0ms, 0.5 at reference, 1.0 at saturation.
+        # Uses a two-stage linear scale so the reference is exactly the midpoint.
+        if hrv_rmssd_milli <= _HRV_REFERENCE_MS:
+            hrv_norm = 0.5 * (hrv_rmssd_milli / _HRV_REFERENCE_MS)
+        else:
+            hrv_norm = 0.5 + 0.5 * min(
+                1.0,
+                (hrv_rmssd_milli - _HRV_REFERENCE_MS) / (_HRV_SATURATION_MS - _HRV_REFERENCE_MS)
+            )
+        components.append((hrv_norm, _READINESS_W_HRV))
+
+    if sleep_performance is not None:
+        components.append((sleep_performance / 100.0, _READINESS_W_SLEEP))
+
+    if not components:
+        return 0.5  # All signals missing → neutral
+
+    # Redistribute weights so they always sum to 1.0
+    total_weight = sum(w for _, w in components)
+    readiness = sum(v * (w / total_weight) for v, w in components)
+
+    return round(_clamp(readiness), 4)
+
+
 # ─── CLS: Cognitive Load Score ───────────────────────────────────────────────
 
 def cognitive_load_score(
@@ -35,6 +106,8 @@ def cognitive_load_score(
     meeting_attendees: int,
     slack_messages_received: int,
     recovery_score: Optional[float],
+    hrv_rmssd_milli: Optional[float] = None,
+    sleep_performance: Optional[float] = None,
     window_duration_minutes: int = 15,
 ) -> float:
     """
@@ -47,6 +120,8 @@ def cognitive_load_score(
         meeting_attendees: number of participants in active meeting
         slack_messages_received: incoming Slack messages in this window
         recovery_score: WHOOP recovery (0-100), None if unavailable
+        hrv_rmssd_milli: HRV in ms (v1.1 — improves physiological baseline)
+        sleep_performance: WHOOP sleep performance (0-100), optional
     """
     # Component: meeting density
     # 1.0 if in a meeting, 0.0 if not
@@ -60,12 +135,11 @@ def cognitive_load_score(
     # 30 messages in 15 min = saturation
     slack_component = _norm(slack_messages_received, max_val=30)
 
-    # Component: Recovery inverse (low recovery = higher load threshold)
-    # If recovery is unknown, assume neutral (0.5 inverse)
-    if recovery_score is not None:
-        recovery_inverse = 1.0 - (recovery_score / 100.0)
-    else:
-        recovery_inverse = 0.5
+    # Component: Recovery inverse (low readiness = higher cognitive load baseline)
+    # v1.1: uses composite physiological readiness (recovery + HRV + sleep)
+    # instead of recovery_score alone.  Low HRV or poor sleep raises the baseline.
+    readiness = physiological_readiness(recovery_score, hrv_rmssd_milli, sleep_performance)
+    recovery_inverse = 1.0 - readiness
 
     # Weighted average
     cls = (
@@ -195,36 +269,59 @@ def context_switch_cost(
 def recovery_alignment_score(
     recovery_score: Optional[float],
     cls: float,
+    hrv_rmssd_milli: Optional[float] = None,
+    sleep_performance: Optional[float] = None,
 ) -> float:
     """
     Recovery Alignment Score — is your activity level appropriate for your physiology?
 
     Range: 0.0 (badly misaligned) to 1.0 (perfectly aligned)
 
-    High recovery + low CLS = aligned (resting on a rest day) → high RAS
-    High recovery + high CLS = aligned (working hard when ready) → high RAS
-    Low recovery + low CLS = semi-aligned (resting when tired) → medium RAS
-    Low recovery + high CLS = misaligned (pushing hard when depleted) → low RAS
+    High readiness + low CLS = aligned (resting on a rest day) → high RAS
+    High readiness + high CLS = aligned (working hard when ready) → high RAS
+    Low readiness + low CLS = semi-aligned (resting when tired) → medium RAS
+    Low readiness + high CLS = misaligned (pushing hard when depleted) → low RAS
+
+    v1.1: capacity_available uses the composite physiological readiness
+    (recovery + HRV + sleep) rather than recovery_score alone.
+    Low HRV or poor sleep correctly reduce the available capacity, making
+    the misalignment signal more sensitive and accurate.
+
+    When all physiological signals are unavailable, returns 0.5 (neutral)
+    to avoid producing a meaningless alignment score.
     """
-    if recovery_score is None:
-        return 0.5  # Unknown, assume neutral
+    # If all physiological signals are absent, we have no basis to compute
+    # alignment — return neutral rather than running the capacity model on
+    # a manufactured 0.5 readiness.
+    if recovery_score is None and hrv_rmssd_milli is None and sleep_performance is None:
+        return 0.5
 
-    recovery_norm = recovery_score / 100.0
+    # v1.2: full composite readiness as capacity measure
+    capacity_available = physiological_readiness(
+        recovery_score, hrv_rmssd_milli, sleep_performance
+    )
 
-    # Best case: high recovery lets you handle high CLS
-    # Worst case: low recovery + high CLS
-    # RAS = recovery × (1 - CLS) + recovery × CLS × bonus
-    # Simplified: reward when recovery permits the load
     capacity_used = cls
-    capacity_available = recovery_norm
 
-    if capacity_available >= capacity_used:
-        # Within capacity: full alignment
-        ras = 1.0 - (0.3 * (1.0 - capacity_available))  # slight penalty for underutilizing high recovery
-    else:
-        # Over capacity: penalty proportional to deficit
-        overload = capacity_used - capacity_available
-        ras = 1.0 - overload
+    # Alignment is modelled as a smooth, monotonic function of (capacity - demand).
+    # The signed margin tells us how comfortable the load is relative to capacity:
+    #   positive margin → working within capacity → good alignment
+    #   negative margin → overloading capacity    → poor alignment
+    #
+    # Formula: RAS = 0.5 + 0.5 * tanh(k * margin)
+    #   k controls sensitivity; k=3 gives a smooth S-curve where a 0.33-unit
+    #   margin (e.g. capacity 0.83, CLS 0.50) yields RAS ≈ 0.90 and a -0.33
+    #   margin yields RAS ≈ 0.10.
+    #
+    # Properties:
+    #   - Strictly monotone: higher capacity always improves RAS for the same CLS
+    #   - Continuous and differentiable (no discontinuous branch transition)
+    #   - Bounded [0, 1] by construction
+    #   - Neutral (0.5) when capacity exactly equals demand
+    import math
+    _K = 3.0
+    margin = capacity_available - capacity_used
+    ras = 0.5 + 0.5 * math.tanh(_K * margin)
 
     return round(_clamp(ras), 4)
 
@@ -237,8 +334,11 @@ def compute_metrics(window_data: dict) -> dict:
 
     window_data must contain:
     - calendar: {in_meeting, meeting_attendees, meeting_duration_minutes}
-    - whoop: {recovery_score}
+    - whoop: {recovery_score, hrv_rmssd_milli, sleep_performance}
     - slack: {messages_sent, messages_received, channels_active}
+
+    v1.1: hrv_rmssd_milli and sleep_performance are now forwarded to CLS
+    and RAS so the physiological readiness composite is fully utilised.
     """
     cal = window_data.get("calendar", {})
     whoop = window_data.get("whoop", {})
@@ -248,6 +348,8 @@ def compute_metrics(window_data: dict) -> dict:
     meeting_attendees = cal.get("meeting_attendees", 0)
     meeting_duration = cal.get("meeting_duration_minutes", 0)
     recovery_score = whoop.get("recovery_score")
+    hrv_rmssd_milli = whoop.get("hrv_rmssd_milli")
+    sleep_performance = whoop.get("sleep_performance")
     slack_sent = slack.get("messages_sent", 0)
     slack_received = slack.get("messages_received", 0)
     slack_channels = slack.get("channels_active", 0)
@@ -257,6 +359,8 @@ def compute_metrics(window_data: dict) -> dict:
         meeting_attendees=meeting_attendees,
         slack_messages_received=slack_received,
         recovery_score=recovery_score,
+        hrv_rmssd_milli=hrv_rmssd_milli,
+        sleep_performance=sleep_performance,
     )
 
     fdi = focus_depth_index(
@@ -282,6 +386,8 @@ def compute_metrics(window_data: dict) -> dict:
     ras = recovery_alignment_score(
         recovery_score=recovery_score,
         cls=cls,
+        hrv_rmssd_milli=hrv_rmssd_milli,
+        sleep_performance=sleep_performance,
     )
 
     return {
