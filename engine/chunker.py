@@ -26,6 +26,7 @@ def build_windows(
     whoop_data: dict,
     calendar_data: dict,
     slack_windows: dict,
+    rescuetime_windows: dict | None = None,
 ) -> list[dict]:
     """
     Build 96 observation windows for a given date.
@@ -35,6 +36,8 @@ def build_windows(
         whoop_data: output from collectors.whoop.collect()
         calendar_data: output from collectors.gcal.collect()
         slack_windows: output from collectors.slack.collect() (keyed by window_index)
+        rescuetime_windows: output from collectors.rescuetime.collect() (keyed by
+            window_index), optional. If None or empty, rescuetime signals are omitted.
 
     Returns:
         List of 96 window dicts, each conforming to the schema in SPEC.md
@@ -103,11 +106,25 @@ def build_windows(
             "channels_active": window_slack.get("channels_active", 0),
         }
 
+        # ── RescueTime signals ────────────────────────────────────────────
+        rt_windows = rescuetime_windows or {}
+        window_rt = rt_windows.get(i, {})
+        rescuetime_signals = {
+            "focus_seconds": window_rt.get("focus_seconds", 0),
+            "distraction_seconds": window_rt.get("distraction_seconds", 0),
+            "neutral_seconds": window_rt.get("neutral_seconds", 0),
+            "active_seconds": window_rt.get("active_seconds", 0),
+            "app_switches": window_rt.get("app_switches", 0),
+            "productivity_score": window_rt.get("productivity_score"),
+            "top_activity": window_rt.get("top_activity"),
+        } if rt_windows else None
+
         # ── Metric computation ────────────────────────────────────────────
         metrics = compute_metrics({
             "calendar": cal_signals,
             "whoop": whoop_signals,
             "slack": slack_signals,
+            **({"rescuetime": rescuetime_signals} if rescuetime_signals else {}),
         })
 
         # ── Metadata ──────────────────────────────────────────────────────
@@ -118,6 +135,8 @@ def build_windows(
             sources.append("calendar")
         if window_slack.get("total_messages", 0) > 0 or True:  # Always available
             sources.append("slack")
+        if rescuetime_signals and rescuetime_signals.get("active_seconds", 0) > 0:
+            sources.append("rescuetime")
 
         window = {
             "window_id": window_start.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -128,6 +147,7 @@ def build_windows(
             "calendar": cal_signals,
             "whoop": whoop_signals,
             "slack": slack_signals,
+            **({"rescuetime": rescuetime_signals} if rescuetime_signals else {}),
             "metrics": metrics,
             "metadata": {
                 "day_of_week": day_of_week,

@@ -29,7 +29,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config import SLACK_LOGS_CHANNEL, GATEWAY_URL, GATEWAY_TOKEN
-from collectors import whoop, gcal, slack
+from collectors import whoop, gcal, slack, rescuetime
 from engine.chunker import build_windows
 from engine.chunker import summarize_day as _summarize_day
 from engine.store import write_day, update_summary, day_exists
@@ -118,6 +118,25 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
         print(f"[presence] Slack collection failed: {e}", file=sys.stderr)
         slack_windows = {}
 
+    # ── Step 3.5: Collect RescueTime (optional) ───────────────────────────
+    rescuetime_windows = {}
+    try:
+        from config import RESCUETIME_API_KEY
+        if RESCUETIME_API_KEY:
+            if not quiet:
+                print("[presence] Collecting RescueTime data...")
+            rescuetime_windows = rescuetime.collect(date_str)
+            active_rt = sum(1 for w in rescuetime_windows.values() if w.get("active_seconds", 0) > 0)
+            if not quiet:
+                print(f"  RescueTime: {active_rt} active windows")
+        else:
+            if not quiet:
+                print("[presence] RescueTime: skipped (no API key configured)")
+    except Exception as e:
+        if not quiet:
+            print(f"[presence] RescueTime collection failed (non-fatal): {e}", file=sys.stderr)
+        rescuetime_windows = {}
+
     # ── Step 4: Build windows ─────────────────────────────────────────────
     if not quiet:
         print("[presence] Building 15-minute windows...")
@@ -126,6 +145,7 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
         whoop_data=whoop_data,
         calendar_data=calendar_data,
         slack_windows=slack_windows,
+        rescuetime_windows=rescuetime_windows,
     )
     if not quiet:
         print(f"  Built {len(windows)} windows")

@@ -19,6 +19,24 @@ SUMMARY_DIR = DATA_DIR / "summary"
 for _dir in [CHUNKS_DIR, MODELS_DIR, SUMMARY_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)
 
+# ─── RescueTime ──────────────────────────────────────────────────────────────
+
+# API key loaded from environment or ~/.clawdbot/clawdbot.json
+# Set RESCUETIME_API_KEY env var, or add "rescuetime_api_key" to clawdbot.json
+RESCUETIME_API_KEY = os.environ.get("RESCUETIME_API_KEY", "")
+
+# RescueTime API base URL (key-based access)
+RESCUETIME_API_BASE = "https://www.rescuetime.com/anapi/data"
+RESCUETIME_DAILY_SUMMARY_URL = "https://www.rescuetime.com/anapi/daily_summary_feed"
+
+# Maximum app switches per 15-min window before saturation (for CSC normalization)
+MAX_APP_SWITCHES_PER_WINDOW = 8
+
+# Minimum active seconds in a window to count as "computer-active"
+# (prevents noisy single-second events from inflating metrics)
+RT_MIN_ACTIVE_SECONDS = 10
+
+
 # ─── WHOOP ────────────────────────────────────────────────────────────────────
 
 # WHOOP tokens are managed by the existing skill at:
