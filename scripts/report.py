@@ -13,6 +13,7 @@ Usage:
     python3 scripts/report.py --compact         # One-screen summary
     python3 scripts/report.py --windows         # Include per-window table
     python3 scripts/report.py --compare 7       # Compare vs N-day average
+    python3 scripts/report.py --trend 14        # Multi-day trend table (last N days)
 
 What it shows (full mode):
   - WHOOP physiological snapshot (recovery, HRV, sleep)
@@ -24,6 +25,12 @@ What it shows (full mode):
   - RescueTime productivity breakdown (if available)
   - Focus quality analysis (active windows, peak hour)
   - Comparison to recent average (with --compare N)
+
+What --trend shows:
+  A compact multi-day table — one row per day — showing DPS, CLS, FDI, RAS,
+  WHOOP recovery, and CDI tier.  Lets David see at a glance how the week has
+  been tracking, spot inflection points, and compare days without reading
+  individual reports.
 
 Design:
   - No external dependencies — pure stdlib + project modules
@@ -43,6 +50,9 @@ Examples:
 
     # See how today compares to the last 14 days
     python3 scripts/report.py --compare 14
+
+    # Multi-day trend table for the last 14 days
+    python3 scripts/report.py --trend 14
 """
 
 import argparse
@@ -701,6 +711,239 @@ def _print_window_table(windows: list[dict]) -> None:
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+def _dps_emoji(dps: Optional[float]) -> str:
+    """Return a compact emoji + score string for the trend table."""
+    if dps is None:
+        return "  — "
+    if dps >= 85:
+        return f"🌟{dps:4.0f}"
+    if dps >= 75:
+        return f"✅{dps:4.0f}"
+    if dps >= 60:
+        return f"🟡{dps:4.0f}"
+    if dps >= 45:
+        return f"🟠{dps:4.0f}"
+    return f"🔴{dps:4.0f}"
+
+
+def _cdi_tier_short(date_str: str) -> str:
+    """Return a short CDI tier label for the trend table, or '—' if unavailable."""
+    try:
+        from analysis.cognitive_debt import compute_cdi
+        debt = compute_cdi(date_str)
+        if debt is None:
+            return "—"
+        tier = debt.tier
+        tier_map = {
+            "surplus":  "surplus ",
+            "balanced": "balanced",
+            "loading":  "loading ",
+            "fatigued": "fatigued",
+            "critical": "critical",
+        }
+        return tier_map.get(tier, tier[:8])
+    except Exception:
+        return "—"
+
+
+def _sparkbar(value: Optional[float], width: int = 6, high_is_bad: bool = False) -> str:
+    """
+    Compact progress bar for use in the trend table.
+
+    Uses half-width to keep the table narrow.  Filled chars represent
+    the metric value on a 0–1 scale.
+    """
+    if value is None:
+        return "·" * width
+    filled = round(value * width)
+    filled = max(0, min(width, filled))
+    bar = "▓" * filled + "░" * (width - filled)
+    return bar
+
+
+def build_trend_rows(days: int) -> list[dict]:
+    """
+    Build a list of summary dicts for the last `days` available days.
+
+    Each dict contains the key values needed for the trend table.
+    Only days with actual data are included (sparse history is fine —
+    the table shows dates in ascending order with gaps filled by
+    whatever data exists).
+    """
+    available = list_available_dates()
+    if not available:
+        return []
+
+    # Take the last `days` available dates
+    selected = available[-days:] if len(available) >= days else available
+
+    rows = []
+    for date_str in selected:
+        report = build_report(date_str)
+        if report is None:
+            continue
+
+        m = report["metrics"]
+        w = report["whoop"]
+        f = report["focus"]
+        dps_data = report.get("presence_score")
+        dps = dps_data["dps"] if dps_data else None
+
+        rows.append({
+            "date": date_str,
+            "dow": datetime.strptime(date_str, "%Y-%m-%d").strftime("%a"),
+            "dps": dps,
+            "cls": m.get("cls"),
+            "fdi": f.get("active_fdi") or m.get("fdi"),
+            "ras": m.get("ras"),
+            "recovery": w.get("recovery_score"),
+            "hrv": w.get("hrv_rmssd_milli"),
+            "sleep": w.get("sleep_hours"),
+            "meeting_mins": report["calendar"].get("meeting_minutes", 0),
+            "slack_sent": report["slack"].get("messages_sent", 0),
+        })
+
+    return rows
+
+
+def print_trend(days: int = 14) -> None:
+    """
+    Print a compact multi-day trend table.
+
+    Columns: Date  Day  DPS  CLS▓  FDI▓  RAS▓  Recov  HRV  Sleep  Mtg  CDI-tier
+
+    DPS is colour-coded; metrics have compact bar representations.
+    One row per day, oldest first.  Empty cells shown as '—'.
+
+    CDI is computed on-the-fly for each day (it's a lookback metric, so
+    the value for a given date reflects the accumulated debt *up to that date*).
+    """
+    available = list_available_dates()
+    if not available:
+        print("  No data available.", file=sys.stderr)
+        return
+
+    rows = build_trend_rows(days)
+    if not rows:
+        print("  No data for the requested range.", file=sys.stderr)
+        return
+
+    # Compute CDI for each row date (can be slow for many days — warn if > 14)
+    for row in rows:
+        row["cdi_tier"] = _cdi_tier_short(row["date"])
+
+    # Header
+    date_range = f"{rows[0]['date']} → {rows[-1]['date']}"
+    print()
+    print(_c(f"  Presence Tracker — {days}-Day Trend  ", BOLD) + _c(f"({date_range})", DIM))
+    print()
+
+    # Column widths:  date(10)  dow(3)  dps(6)  cls(8)  fdi(8)  ras(8)  recov(6)  hrv(5)  sleep(5)  mtg(5)  cdi(9)
+    hdr = (
+        f"  {'Date':<10}  {'Day':<3}  "
+        f"{'DPS':>6}  {'CLS':>8}  {'FDI':>8}  {'RAS':>8}  "
+        f"{'Recov':>5}  {'HRV':>5}  {'Sleep':>5}  {'Mtg':>4}  "
+        f"{'CDI':<9}"
+    )
+    print(_c(hdr, DIM))
+    print(_c("  " + "─" * 85, DIM))
+
+    for row in rows:
+        date_s = row["date"]
+        dow_s  = row["dow"]
+
+        # DPS — emoji + number, colour-coded
+        dps_val = row["dps"]
+        dps_str = _dps_emoji(dps_val)
+
+        # Metric bars + values
+        def _col(val: Optional[float], high_is_bad: bool = False) -> str:
+            if val is None:
+                return f"{'—':>8}"
+            bar = _sparkbar(val, 5, high_is_bad=high_is_bad)
+            return f"{bar} {val*100:3.0f}%"
+
+        cls_col  = _col(row["cls"],  high_is_bad=True)
+        fdi_col  = _col(row["fdi"])
+        ras_col  = _col(row["ras"])
+
+        # WHOOP
+        rec  = row["recovery"]
+        hrv  = row["hrv"]
+        slp  = row["sleep"]
+        rec_s  = f"{rec:3.0f}%" if rec  is not None else "  — "
+        hrv_s  = f"{hrv:3.0f}"  if hrv  is not None else "  —"
+        slp_s  = f"{slp:3.1f}h" if slp  is not None else "  —"
+
+        # Meeting load
+        mtg = row.get("meeting_mins", 0) or 0
+        mtg_s = f"{mtg:3.0f}m" if mtg > 0 else "   —"
+
+        # CDI
+        cdi_s = row.get("cdi_tier", "—")
+
+        # Colour the row by DPS tier
+        if dps_val is not None:
+            if dps_val >= 85:
+                row_colour = GREEN
+            elif dps_val >= 60:
+                row_colour = ""  # plain
+            elif dps_val >= 45:
+                row_colour = YELLOW
+            else:
+                row_colour = RED
+        else:
+            row_colour = ""
+
+        line = (
+            f"  {date_s:<10}  {dow_s:<3}  "
+            f"{dps_str:>6}  {cls_col}  {fdi_col}  {ras_col}  "
+            f"{rec_s:>5}  {hrv_s:>5}  {slp_s:>5}  {mtg_s:>4}  "
+            f"{cdi_s:<9}"
+        )
+        if row_colour:
+            print(_c(line, row_colour))
+        else:
+            print(line)
+
+    # Summary footer: averages across shown days
+    print(_c("  " + "─" * 85, DIM))
+    cls_vals  = [r["cls"]      for r in rows if r["cls"]      is not None]
+    fdi_vals  = [r["fdi"]      for r in rows if r["fdi"]      is not None]
+    ras_vals  = [r["ras"]      for r in rows if r["ras"]      is not None]
+    dps_vals  = [r["dps"]      for r in rows if r["dps"]      is not None]
+    rec_vals  = [r["recovery"] for r in rows if r["recovery"] is not None]
+
+    def _mean(vals: list) -> Optional[float]:
+        return sum(vals) / len(vals) if vals else None
+
+    avg_dps = _mean(dps_vals)
+    avg_cls = _mean(cls_vals)
+    avg_fdi = _mean(fdi_vals)
+    avg_ras = _mean(ras_vals)
+    avg_rec = _mean(rec_vals)
+
+    avg_dps_s = f"{avg_dps:.0f}" if avg_dps is not None else "—"
+    avg_cls_s = f"{avg_cls*100:.0f}%" if avg_cls is not None else "—"
+    avg_fdi_s = f"{avg_fdi*100:.0f}%" if avg_fdi is not None else "—"
+    avg_ras_s = f"{avg_ras*100:.0f}%" if avg_ras is not None else "—"
+    avg_rec_s = f"{avg_rec:.0f}%" if avg_rec is not None else "—"
+
+    summary = (
+        f"  {'Avg':>10}  {'':3}  "
+        f"{avg_dps_s:>6}  {'':>8}  {'':>8}  {'':>8}  "
+        f"{'CLS '+avg_cls_s:>5}  {'FDI '+avg_fdi_s:>8}  {'RAS '+avg_ras_s:>9}  "
+        f"{'Rec '+avg_rec_s:>6}"
+    )
+    # Simpler summary line
+    print(_c(
+        f"  {'Averages':>10}   DPS {avg_dps_s:>3} | CLS {avg_cls_s:>4} | "
+        f"FDI {avg_fdi_s:>4} | RAS {avg_ras_s:>4} | Recovery {avg_rec_s:>4}",
+        DIM
+    ))
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Presence Tracker — Per-Day Terminal Report",
@@ -729,7 +972,17 @@ def main() -> None:
         "--compare", "-n", type=int, default=0, metavar="DAYS",
         help="Compare today's metrics vs N-day rolling average",
     )
+    parser.add_argument(
+        "--trend", "-t", type=int, default=0, metavar="DAYS",
+        help="Show compact multi-day trend table for the last N available days "
+             "(default: all available if -t given without a value)",
+    )
     args = parser.parse_args()
+
+    # ── Trend mode — no date argument needed ─────────────────────────────────
+    if args.trend:
+        print_trend(days=args.trend)
+        return
 
     # Validate date
     try:

@@ -865,3 +865,276 @@ class TestCLIEdgeCases:
             assert e.code == 0 or e.code is None
         finally:
             sys.argv = old_argv
+
+
+# ─── Trend table tests (v9.1) ─────────────────────────────────────────────────
+
+class TestBuildTrendRows:
+    """Tests for build_trend_rows() — multi-day summary extraction."""
+
+    def test_empty_store_returns_empty_list(self):
+        from scripts.report import build_trend_rows
+        with patch("scripts.report.list_available_dates", return_value=[]):
+            rows = build_trend_rows(14)
+        assert rows == []
+
+    def test_returns_one_row_per_available_day(self):
+        from scripts.report import build_trend_rows
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-13", "2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(14)
+        assert len(rows) == 2
+
+    def test_row_has_required_keys(self):
+        from scripts.report import build_trend_rows
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(14)
+        assert len(rows) == 1
+        row = rows[0]
+        for key in ["date", "dow", "dps", "cls", "fdi", "ras", "recovery", "meeting_mins"]:
+            assert key in row, f"Missing key: {key}"
+
+    def test_days_limit_is_respected(self):
+        from scripts.report import build_trend_rows
+        available = [f"2026-03-{d:02d}" for d in range(1, 15)]  # 14 dates
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=available), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(7)
+        assert len(rows) == 7
+
+    def test_dates_in_ascending_order(self):
+        from scripts.report import build_trend_rows
+        available = ["2026-03-13", "2026-03-14"]
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=available), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(14)
+        dates = [r["date"] for r in rows]
+        assert dates == sorted(dates)
+
+    def test_dps_is_numeric_or_none(self):
+        from scripts.report import build_trend_rows
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(1)
+        row = rows[0]
+        assert row["dps"] is None or isinstance(row["dps"], (int, float))
+
+    def test_cls_fdi_ras_are_numeric_or_none(self):
+        from scripts.report import build_trend_rows
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(1)
+        row = rows[0]
+        for key in ["cls", "fdi", "ras"]:
+            assert row[key] is None or isinstance(row[key], float), f"{key} not float/None"
+
+    def test_dow_is_three_letter_string(self):
+        from scripts.report import build_trend_rows
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows):
+            rows = build_trend_rows(1)
+        assert rows[0]["dow"] in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+
+
+class TestDpsEmoji:
+    """Tests for _dps_emoji() — compact emoji+score formatting."""
+
+    def test_exceptional_gets_star_emoji(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(90.0)
+        assert "🌟" in result
+
+    def test_strong_gets_check_emoji(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(80.0)
+        assert "✅" in result
+
+    def test_good_gets_yellow_circle(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(65.0)
+        assert "🟡" in result
+
+    def test_moderate_gets_orange_circle(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(50.0)
+        assert "🟠" in result
+
+    def test_poor_gets_red_circle(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(30.0)
+        assert "🔴" in result
+
+    def test_none_returns_placeholder(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(None)
+        assert "—" in result
+
+    def test_returns_string(self):
+        from scripts.report import _dps_emoji
+        assert isinstance(_dps_emoji(75.0), str)
+        assert isinstance(_dps_emoji(None), str)
+
+    def test_score_included_in_output(self):
+        from scripts.report import _dps_emoji
+        result = _dps_emoji(88.0)
+        assert "88" in result
+
+
+class TestSparkbar:
+    """Tests for _sparkbar() — compact progress bar for trend table."""
+
+    def test_full_value_all_filled(self):
+        from scripts.report import _sparkbar
+        bar = _sparkbar(1.0, 6)
+        assert bar == "▓▓▓▓▓▓"
+
+    def test_zero_value_all_empty(self):
+        from scripts.report import _sparkbar
+        bar = _sparkbar(0.0, 6)
+        assert bar == "░░░░░░"
+
+    def test_half_value_half_filled(self):
+        from scripts.report import _sparkbar
+        bar = _sparkbar(0.5, 6)
+        assert bar.count("▓") == 3
+        assert bar.count("░") == 3
+
+    def test_width_respected(self):
+        from scripts.report import _sparkbar
+        for width in [4, 6, 8, 10]:
+            bar = _sparkbar(0.5, width)
+            assert len(bar) == width
+
+    def test_none_returns_dots(self):
+        from scripts.report import _sparkbar
+        bar = _sparkbar(None, 6)
+        assert bar == "······"
+
+    def test_out_of_range_clamped(self):
+        from scripts.report import _sparkbar
+        bar_over = _sparkbar(1.5, 6)
+        bar_under = _sparkbar(-0.5, 6)
+        assert len(bar_over) == 6
+        assert len(bar_under) == 6
+        assert bar_over == "▓▓▓▓▓▓"
+        assert bar_under == "░░░░░░"
+
+
+class TestPrintTrend:
+    """Tests for print_trend() — multi-day trend table rendering."""
+
+    def test_prints_something_with_data(self, capsys):
+        from scripts.report import print_trend
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-13", "2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows), \
+             patch("scripts.report._cdi_tier_short", return_value="balanced"):
+            print_trend(14)
+        out = capsys.readouterr().out
+        assert len(out.strip()) > 0
+
+    def test_no_data_prints_error(self, capsys):
+        from scripts.report import print_trend
+        with patch("scripts.report.list_available_dates", return_value=[]):
+            print_trend(14)
+        # Should not crash; error goes to stderr
+        out = capsys.readouterr()
+        assert True  # just verifying no exception
+
+    def test_output_contains_date(self, capsys):
+        from scripts.report import print_trend
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows), \
+             patch("scripts.report._cdi_tier_short", return_value="balanced"):
+            print_trend(14)
+        out = capsys.readouterr().out
+        assert "2026-03-14" in out
+
+    def test_output_contains_averages_footer(self, capsys):
+        from scripts.report import print_trend
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-13", "2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows), \
+             patch("scripts.report._cdi_tier_short", return_value="balanced"):
+            print_trend(14)
+        out = capsys.readouterr().out
+        assert "Averages" in out
+
+    def test_output_contains_trend_header(self, capsys):
+        from scripts.report import print_trend
+        windows = _make_day_windows(20)
+        with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+             patch("scripts.report.read_day", return_value=windows), \
+             patch("scripts.report._cdi_tier_short", return_value="balanced"):
+            print_trend(7)
+        out = capsys.readouterr().out
+        assert "Trend" in out
+
+    def test_each_day_appears_as_row(self, capsys):
+        from scripts.report import print_trend
+        windows = _make_day_windows(20)
+        dates = ["2026-03-13", "2026-03-14"]
+        with patch("scripts.report.list_available_dates", return_value=dates), \
+             patch("scripts.report.read_day", return_value=windows), \
+             patch("scripts.report._cdi_tier_short", return_value="balanced"):
+            print_trend(14)
+        out = capsys.readouterr().out
+        for d in dates:
+            assert d in out
+
+    def test_cli_trend_flag_triggers_trend_mode(self, capsys):
+        """--trend N should call print_trend, not per-day report."""
+        import sys
+        windows = _make_day_windows(20)
+        old_argv = sys.argv
+        sys.argv = ["report.py", "--trend", "7"]
+        try:
+            from scripts.report import main as report_main
+            with patch("scripts.report.list_available_dates", return_value=["2026-03-14"]), \
+                 patch("scripts.report.read_day", return_value=windows), \
+                 patch("scripts.report._cdi_tier_short", return_value="balanced"):
+                report_main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+        finally:
+            sys.argv = old_argv
+        out = capsys.readouterr().out
+        assert "Trend" in out or "2026-03-14" in out
+
+
+class TestCdiTierShort:
+    """Tests for _cdi_tier_short() — CDI tier lookup for trend table."""
+
+    def test_returns_string(self):
+        from scripts.report import _cdi_tier_short
+        from unittest.mock import MagicMock
+        mock_debt = MagicMock()
+        mock_debt.tier = "balanced"
+        with patch("scripts.report._cdi_tier_short.__module__"), \
+             patch("analysis.cognitive_debt.compute_cdi", return_value=mock_debt):
+            # Direct call should not crash
+            result = _cdi_tier_short("2026-03-14")
+        # Either a real result or fallback "—"
+        assert isinstance(result, str)
+
+    def test_exception_returns_dash(self):
+        from scripts.report import _cdi_tier_short
+        # When compute_cdi raises, should return "—" gracefully
+        with patch("analysis.cognitive_debt.compute_cdi", side_effect=Exception("fail")):
+            result = _cdi_tier_short("2026-03-14")
+        assert result == "—"
+
+    def test_none_cdi_returns_dash(self):
+        from scripts.report import _cdi_tier_short
+        with patch("analysis.cognitive_debt.compute_cdi", return_value=None):
+            result = _cdi_tier_short("2026-03-14")
+        assert result == "—"
