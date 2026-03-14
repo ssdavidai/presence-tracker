@@ -31,6 +31,13 @@ async def run_weekly_intuition() -> bool:
 
 
 @activity.defn
+async def send_morning_readiness_brief(date_str: str) -> bool:
+    """Send the morning readiness brief to David's Slack DM."""
+    from analysis.morning_brief import send_morning_brief
+    return send_morning_brief(date_str)
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

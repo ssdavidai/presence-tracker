@@ -30,12 +30,21 @@ from temporalio.client import (
 )
 
 from config import TEMPORAL_ADDRESS, TASK_QUEUE
-from temporal.workflows import DailyIngestionWorkflow, WeeklyAnalysisWorkflow
+from temporal.workflows import DailyIngestionWorkflow, WeeklyAnalysisWorkflow, MorningBriefWorkflow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SCHEDULES = [
+    {
+        "id": "presence-morning-brief",
+        # 06:00 UTC = 07:00 Budapest (CET/UTC+1).
+        # WHOOP posts overnight data by ~6am local time, so 7am is safe.
+        "cron": "0 6 * * *",
+        "workflow": MorningBriefWorkflow,
+        "workflow_id": "presence-morning-brief-workflow",
+        "description": "Morning readiness brief — WHOOP readiness + day planning recommendation",
+    },
     {
         "id": "presence-daily-ingestion",
         # 22:45 UTC = 23:45 Budapest (CET/UTC+1). In CEST (UTC+2): adjust manually.

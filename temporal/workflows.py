@@ -10,7 +10,12 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from temporal.activities import ingest_day, run_weekly_intuition, notify_slack_presence
+    from temporal.activities import (
+        ingest_day,
+        run_weekly_intuition,
+        send_morning_readiness_brief,
+        notify_slack_presence,
+    )
 
 RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=30),
@@ -65,6 +70,49 @@ class DailyIngestionWorkflow:
 
         except Exception as e:
             error_msg = f"[PRESENCE] Daily ingestion FAILED for {date_str}: {str(e)}"
+            workflow.logger.error(error_msg)
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[error_msg],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            raise
+
+
+@workflow.defn
+class MorningBriefWorkflow:
+    """
+    Morning readiness brief — send David a Slack DM with WHOOP readiness.
+
+    Schedule: 07:00 Budapest time, daily
+    """
+
+    @workflow.run
+    async def run(self, date_str: str = None) -> str:
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        workflow.logger.info(f"Starting morning brief for {date_str}")
+
+        try:
+            ok = await workflow.execute_activity(
+                send_morning_readiness_brief,
+                args=[date_str],
+                start_to_close_timeout=DEFAULT_TIMEOUT,
+                retry_policy=RETRY_POLICY,
+            )
+
+            status = "sent" if ok else "failed"
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[f"[PRESENCE] Morning brief {status} — {date_str}"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            return f"Morning brief {status}: {date_str}"
+
+        except Exception as e:
+            error_msg = f"[PRESENCE] Morning brief FAILED for {date_str}: {str(e)}"
             workflow.logger.error(error_msg)
             await workflow.execute_activity(
                 notify_slack_presence,
