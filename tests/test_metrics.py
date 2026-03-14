@@ -85,22 +85,48 @@ class TestFocusDepthIndex:
         )
         assert fdi >= 0.90, f"Zero disruption should yield high FDI, got {fdi}"
 
-    def test_in_meeting_returns_low(self):
+    def test_in_social_meeting_returns_low(self):
+        # A social meeting (multiple attendees) with heavy Slack = low FDI
         fdi = focus_depth_index(
             in_meeting=True,
             slack_messages_received=15,
             context_switches=5,
+            meeting_attendees=4,
         )
-        assert fdi < 0.40, f"High disruption should yield low FDI, got {fdi}"
+        assert fdi < 0.40, f"High disruption social meeting should yield low FDI, got {fdi}"
+
+    def test_solo_focus_block_returns_high_fdi(self):
+        # v1.4: A solo calendar block (focus session) should not penalise FDI.
+        # meeting_attendees=0 means no other participants — deliberate focus time.
+        fdi_solo = focus_depth_index(
+            in_meeting=True,
+            slack_messages_received=0,
+            context_switches=0,
+            meeting_attendees=0,
+        )
+        fdi_idle = focus_depth_index(
+            in_meeting=False,
+            slack_messages_received=0,
+            context_switches=0,
+        )
+        assert fdi_solo >= 0.90, f"Solo focus block should yield high FDI, got {fdi_solo}"
+        assert abs(fdi_solo - fdi_idle) < 0.05, (
+            f"Solo block FDI ({fdi_solo}) should be similar to idle FDI ({fdi_idle})"
+        )
 
     def test_output_range(self):
-        for args in [
-            (True, 30, 20),
-            (False, 0, 0),
-            (True, 0, 0),
-            (False, 30, 20),
+        for in_meeting, slack_rcv, ctx, attendees in [
+            (True, 30, 20, 5),
+            (False, 0, 0, 0),
+            (True, 0, 0, 0),
+            (False, 30, 20, 0),
         ]:
-            fdi = focus_depth_index(*args)
+            fdi = focus_depth_index(
+                in_meeting=in_meeting,
+                slack_messages_received=slack_rcv,
+                context_switches=ctx,
+                meeting_attendees=attendees,
+            )
             assert 0.0 <= fdi <= 1.0, f"FDI out of range: {fdi}"
 
 
@@ -113,6 +139,40 @@ class TestSocialDrainIndex:
             slack_messages_received=0,
         )
         assert sdi == 0.0, f"No social activity should be 0 SDI, got {sdi}"
+
+    def test_solo_calendar_block_returns_zero(self):
+        # v1.4: a solo calendar block (focus session, personal event) has no other
+        # attendees — it should return SDI=0 despite in_meeting=True.
+        sdi_zero_attendees = social_drain_index(
+            in_meeting=True,
+            meeting_attendees=0,
+            slack_messages_sent=0,
+            slack_messages_received=0,
+        )
+        sdi_one_attendee = social_drain_index(
+            in_meeting=True,
+            meeting_attendees=1,
+            slack_messages_sent=0,
+            slack_messages_received=0,
+        )
+        assert sdi_zero_attendees == 0.0, (
+            f"Solo block (0 attendees) should have SDI=0, got {sdi_zero_attendees}"
+        )
+        assert sdi_one_attendee == 0.0, (
+            f"Solo block (1 attendee = just David) should have SDI=0, got {sdi_one_attendee}"
+        )
+
+    def test_social_meeting_requires_more_than_one_attendee(self):
+        # Social meetings need at least 2 attendees (David + someone else)
+        sdi_2 = social_drain_index(
+            in_meeting=True,
+            meeting_attendees=2,
+            slack_messages_sent=0,
+            slack_messages_received=0,
+        )
+        assert sdi_2 > 0.0, (
+            f"A 1:1 meeting (2 attendees) should have positive SDI, got {sdi_2}"
+        )
 
     def test_large_meeting_returns_high(self):
         sdi = social_drain_index(

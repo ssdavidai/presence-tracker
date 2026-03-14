@@ -37,6 +37,31 @@ v1.2 — RescueTime integration:
 
   All three functions accept optional rescuetime_data kwargs so existing
   callers without RT data continue to work unchanged.
+
+v1.4 — Solo-meeting fix (SDI + FDI):
+  Social Drain Index (SDI) and Focus Depth Index (FDI) now distinguish between
+  social meetings (with other attendees) and solo calendar blocks (focus sessions,
+  personal events, reminders).
+
+  Problem: any window with in_meeting=True was treated as a social interaction.
+  Solo calendar blocks — deliberate deep-work focus periods, baby-swimming classes,
+  personal reminders — have attendee_count == 0 (or 1 via old gcal default) but
+  were registering SDI ≈ 0.30–0.35 and FDI ≈ 0.60 due to the binary meeting flag.
+
+  SDI fix: meeting_component (0.30 weight) now only fires for social meetings
+    (meeting_attendees > 1).  A solo calendar block correctly returns SDI near 0.
+
+  FDI fix: meeting_disruption (0.40 weight) now only fires for social meetings.
+    A solo focus block no longer penalises focus depth — it IS deep focus.
+
+  gcal.py fix: attendee_count default changed from 1 to 0 for events with no
+    attendees.  The old default ("at minimum, just David") conflated David's
+    presence with the presence of other participants, inflating attendee counts
+    for all personal calendar events.
+
+  Impact: solo calendar blocks now return SDI ≈ 0 and FDI ≈ 1.0 (appropriate).
+    Social meetings are unaffected (>1 attendees still fires the full signal).
+    This corrects a systematic overestimation of social drain for personal events.
 """
 
 from typing import Optional
@@ -215,6 +240,7 @@ def focus_depth_index(
     rt_app_switches: Optional[int] = None,
     rt_active_seconds: int = 0,
     rt_productivity_score: Optional[float] = None,
+    meeting_attendees: int = 0,
 ) -> float:
     """
     Focus Depth Index — how deep was the focus in this window?
@@ -234,14 +260,26 @@ def focus_depth_index(
         rt_productivity_score: RescueTime productivity (0–1).  When
             available, incorporated as an additional focus signal: a
             distracted window has lower FDI independent of app switches.
+        meeting_attendees: number of participants in the active meeting
+            (v1.4).  When provided, used to distinguish social meetings
+            (disrupted focus) from solo focus blocks (protected time).
 
     v1.2: When RescueTime data is present (rt_app_switches is not None
     and rt_active_seconds >= 60), real app-switch counts replace the
     Slack-channels proxy for context switching, improving precision of
     the FDI signal significantly.
+
+    v1.4 — Solo-meeting fix:
+      A calendar block with no other attendees (meeting_attendees ≤ 1) is a
+      scheduled focus session, not a social meeting.  Social meetings interrupt
+      deep work; solo blocks protect it.  meeting_disruption now only fires for
+      social meetings (meeting_attendees > 1), so deliberate focus-block scheduling
+      is no longer penalised as a disruption in the FDI signal.
     """
-    # Meetings break focus
-    meeting_disruption = 1.0 if in_meeting else 0.0
+    # Social meetings (with other attendees) break focus.
+    # Solo calendar blocks (focus sessions, personal events) do not.
+    is_social_meeting = in_meeting and meeting_attendees > 1
+    meeting_disruption = 1.0 if is_social_meeting else 0.0
 
     # Slack interruptions
     slack_disruption = _norm(slack_messages_received, max_val=30)
@@ -291,12 +329,30 @@ def social_drain_index(
     Range: 0.0 (isolated/quiet) to 1.0 (maximum social engagement)
 
     Higher values indicate more social interactions that may drain energy.
-    """
-    # Large meetings drain more energy
-    attendee_component = _norm(meeting_attendees if in_meeting else 0, max_val=10)
 
-    # Any meeting at all
-    meeting_component = 1.0 if in_meeting else 0.0
+    v1.4 — Solo-meeting fix:
+      meeting_component now only fires for social meetings (meeting_attendees > 1).
+      A solo calendar block (focus session, personal reminder, event with no other
+      attendees) has meeting_attendees == 0 or 1 and carries zero social drain —
+      it is deliberate protected time, not a social interaction.
+
+      Previously meeting_component = 1.0 for ANY in_meeting window, causing solo
+      blocks to register SDI ≈ 0.30–0.35 despite zero social interaction.
+      This inflated weekly social drain stats for focus-protective scheduling.
+
+      The fix: is_social_meeting = in_meeting AND meeting_attendees > 1
+      Solo focus blocks (attendees ≤ 1) correctly return SDI near 0.
+    """
+    # A meeting is "social" only when there is at least one other participant.
+    # Solo focus blocks, personal events, and calendar reminders have 0–1 attendee
+    # and should not contribute to social drain.
+    is_social_meeting = in_meeting and meeting_attendees > 1
+
+    # Large social meetings drain more energy (normalised by max expected = 10)
+    attendee_component = _norm(meeting_attendees if is_social_meeting else 0, max_val=10)
+
+    # Binary signal: are we in a social meeting at all?
+    meeting_component = 1.0 if is_social_meeting else 0.0
 
     # Sent messages (active communication) vs received (passive)
     total_slack = slack_messages_sent + slack_messages_received
@@ -497,6 +553,7 @@ def compute_metrics(window_data: dict) -> dict:
         rt_app_switches=rt_app_switches,
         rt_active_seconds=rt_active_seconds,
         rt_productivity_score=rt_productivity_score,
+        meeting_attendees=meeting_attendees,  # v1.4: solo-block awareness
     )
 
     sdi = social_drain_index(

@@ -33,7 +33,13 @@ def _parse_event(event: dict) -> dict:
         duration_minutes = int((end - start).total_seconds() / 60)
 
     attendees = event.get("attendees", [])
-    attendee_count = len(attendees) if attendees else 1  # At minimum, just David
+    # Count OTHER attendees only (not David himself).
+    # Google Calendar includes the event owner in the attendees list for
+    # shared events, but solo blocks / personal reminders have an empty
+    # attendees list.  Defaulting to 1 ("just David") was inflating SDI for
+    # solo activities that have no social drain.  Correct default is 0: a
+    # calendar block with no attendees is a solo / focus event, not a meeting.
+    attendee_count = len(attendees) if attendees else 0
 
     return {
         "id": event.get("id", ""),
