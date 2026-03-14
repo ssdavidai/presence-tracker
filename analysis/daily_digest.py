@@ -496,6 +496,43 @@ def compute_digest(windows: list[dict]) -> dict:
     hrv = whoop.get("hrv_rmssd_milli")
     sleep_h = whoop.get("sleep_hours")
 
+    # ── RescueTime stats (v1.5) ───────────────────────────────────────────
+    # Aggregate focus/distraction computer time from working-hour windows.
+    # Only populated when RescueTime data is actually present in the windows.
+    # None means RT is not configured — the digest section is skipped entirely.
+    rt_working_windows = [
+        w for w in working
+        if w.get("rescuetime") is not None
+        and w["rescuetime"].get("active_seconds", 0) > 0
+    ]
+
+    if rt_working_windows:
+        rt_focus_secs = sum(w["rescuetime"]["focus_seconds"] for w in rt_working_windows)
+        rt_distraction_secs = sum(w["rescuetime"]["distraction_seconds"] for w in rt_working_windows)
+        rt_active_secs = sum(w["rescuetime"]["active_seconds"] for w in rt_working_windows)
+        rt_productive_pct = (
+            round(100.0 * rt_focus_secs / rt_active_secs, 1)
+            if rt_active_secs > 0 else None
+        )
+        # Most common top_activity across RT windows (best proxy for "main app today")
+        from collections import Counter as _Counter
+        _acts = [
+            w["rescuetime"]["top_activity"]
+            for w in rt_working_windows
+            if w["rescuetime"].get("top_activity")
+        ]
+        rt_top_activity = _Counter(_acts).most_common(1)[0][0] if _acts else None
+
+        rescuetime_digest: Optional[dict] = {
+            "focus_minutes": round(rt_focus_secs / 60, 1),
+            "distraction_minutes": round(rt_distraction_secs / 60, 1),
+            "active_minutes": round(rt_active_secs / 60, 1),
+            "productive_pct": rt_productive_pct,
+            "top_activity": rt_top_activity,
+        }
+    else:
+        rescuetime_digest = None
+
     # ── Multi-day trend context ────────────────────────────────────────────
     # Loads recent history to detect streaks and baseline deviations.
     # Gracefully returns {} if no history is available yet.
@@ -550,6 +587,8 @@ def compute_digest(windows: list[dict]) -> dict:
         "insight": insight,
         # v1.3: hourly CLS sparkline data (list of 15 floats, 7am–9pm)
         "hourly_cls_curve": hourly_cls_curve,
+        # v1.5: RescueTime computer-time breakdown (None when RT not configured)
+        "rescuetime": rescuetime_digest,
     }
 
 
@@ -736,6 +775,7 @@ def format_digest_message(digest: dict) -> str:
     peak_window = digest.get("peak_window")
     insight = digest.get("insight", "")
     hourly_cls_curve = digest.get("hourly_cls_curve")
+    rescuetime = digest.get("rescuetime")  # None when RT not configured
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -806,6 +846,31 @@ def format_digest_message(digest: dict) -> str:
         lines.append("_" + "  ·  ".join(activity_parts) + "_")
     else:
         lines.append("_No significant activity detected_")
+
+    # ── RescueTime computer-time breakdown (v1.5) ─────────────────────────
+    # Only shown when RT data was collected.  Gives David a concrete picture
+    # of how his computer time broke down: focus vs distraction vs total.
+    # Example: "Computer: 4.2h active  ·  2.8h focus (67%)  ·  0.4h distraction"
+    if rescuetime:
+        rt_active = rescuetime.get("active_minutes", 0)
+        rt_focus = rescuetime.get("focus_minutes", 0)
+        rt_distraction = rescuetime.get("distraction_minutes", 0)
+        rt_pct = rescuetime.get("productive_pct")
+        rt_top = rescuetime.get("top_activity")
+
+        rt_parts = []
+        if rt_active > 0:
+            rt_parts.append(f"{rt_active / 60:.1f}h on computer")
+        if rt_focus > 0:
+            pct_str = f" ({rt_pct:.0f}%)" if rt_pct is not None else ""
+            rt_parts.append(f"{rt_focus / 60:.1f}h focused{pct_str}")
+        if rt_distraction > 0:
+            rt_parts.append(f"{rt_distraction / 60:.1f}h distracted")
+        if rt_top:
+            rt_parts.append(f"mostly {rt_top}")
+
+        if rt_parts:
+            lines.append("_💻 " + "  ·  ".join(rt_parts) + "_")
 
     # ── Trend indicator (multi-day pattern, if detected) ──
     trend = digest.get("trend", {})

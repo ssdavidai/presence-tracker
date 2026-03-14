@@ -361,3 +361,173 @@ class TestFocusQuality:
         active_count = summary["focus_quality"]["active_windows"]
         # Windows 30 (hour 7) and 31 (hour 7) — both within working hours (7am+)
         assert active_count >= 2, f"Expected at least 2 active windows, got {active_count}"
+
+
+class TestSummarizeRescueTimeSection:
+    """Tests for the v1.5 RescueTime aggregate section in summarize_day()."""
+
+    def _make_rt_windows(self, window_indices: list[int], focus_s: int = 600,
+                         distraction_s: int = 120, active_s: int = 780,
+                         neutral_s: int = 60, top_activity: str = "VS Code") -> dict:
+        """Build a rescuetime_windows dict for given working-hour window indices."""
+        rt = {}
+        for idx in window_indices:
+            rt[idx] = {
+                "focus_seconds": focus_s,
+                "distraction_seconds": distraction_s,
+                "neutral_seconds": neutral_s,
+                "active_seconds": active_s,
+                "app_switches": 2,
+                "productivity_score": 0.75,
+                "top_activity": top_activity,
+            }
+        return rt
+
+    def test_rescuetime_absent_when_no_rt_data(self):
+        """summarize_day() must NOT include a 'rescuetime' key when no RT windows exist."""
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {})
+        summary = summarize_day(windows)
+        assert "rescuetime" not in summary, (
+            "rescuetime key must be omitted when no RescueTime data was collected"
+        )
+
+    def test_rescuetime_present_when_rt_data_exists(self):
+        """summarize_day() must include a 'rescuetime' key when RT windows have data."""
+        # Windows 28-31 = hour 7 (working hours)
+        rt = self._make_rt_windows([28, 29, 30, 31])
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert "rescuetime" in summary, (
+            "rescuetime key must be present when RescueTime windows have active_seconds > 0"
+        )
+
+    def test_rescuetime_has_required_fields(self):
+        """The rescuetime summary section must have all required fields."""
+        rt = self._make_rt_windows([28, 32, 36])
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        rt_s = summary["rescuetime"]
+        required = {"focus_minutes", "distraction_minutes", "neutral_minutes",
+                    "active_minutes", "productive_pct", "top_activities", "rt_windows"}
+        missing = required - set(rt_s.keys())
+        assert not missing, f"Missing fields in rescuetime summary: {missing}"
+
+    def test_rescuetime_focus_minutes_correct(self):
+        """focus_minutes must equal sum of focus_seconds / 60 across RT working windows."""
+        # 4 working-hour windows × 600 focus_seconds = 2400s = 40 min
+        rt = self._make_rt_windows([28, 29, 30, 31], focus_s=600)
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert summary["rescuetime"]["focus_minutes"] == pytest.approx(40.0, abs=0.2)
+
+    def test_rescuetime_active_minutes_correct(self):
+        """active_minutes must equal sum of active_seconds / 60 across RT working windows."""
+        # 4 windows × 780 active_seconds = 3120s = 52 min
+        rt = self._make_rt_windows([28, 29, 30, 31], active_s=780)
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert summary["rescuetime"]["active_minutes"] == pytest.approx(52.0, abs=0.2)
+
+    def test_rescuetime_productive_pct_correct(self):
+        """productive_pct must be focus_seconds / active_seconds × 100."""
+        # focus=600, active=800 → 75.0%
+        rt = self._make_rt_windows([28, 29], focus_s=600, active_s=800)
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert summary["rescuetime"]["productive_pct"] == pytest.approx(75.0, abs=0.5)
+
+    def test_rescuetime_productive_pct_in_range(self):
+        """productive_pct must be between 0 and 100."""
+        rt = self._make_rt_windows([28, 29, 30, 31, 32])
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        pct = summary["rescuetime"]["productive_pct"]
+        if pct is not None:
+            assert 0.0 <= pct <= 100.0, f"productive_pct={pct} out of range"
+
+    def test_rescuetime_excludes_non_working_hours(self):
+        """RT data from outside working hours (0-6, 22-23) must NOT be counted."""
+        # Windows 0-3 = midnight (not working hours)
+        rt_non_working = self._make_rt_windows([0, 1, 2, 3], focus_s=900)
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt_non_working)
+        summary = summarize_day(windows)
+        # Non-working-hours windows should not produce a rescuetime section
+        assert "rescuetime" not in summary, (
+            "RescueTime data from outside working hours must not appear in summary"
+        )
+
+    def test_rescuetime_top_activities_is_list(self):
+        """top_activities must be a list (possibly empty)."""
+        rt = self._make_rt_windows([28, 29], top_activity="Chrome")
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert isinstance(summary["rescuetime"]["top_activities"], list)
+
+    def test_rescuetime_top_activities_most_frequent_first(self):
+        """top_activities must list activities by frequency (most common first)."""
+        # Manually build windows with different top activities
+        rt = {
+            # Working hour 7: windows 28-31
+            28: {"focus_seconds": 600, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 600, "app_switches": 1, "productivity_score": 1.0,
+                 "top_activity": "VS Code"},
+            29: {"focus_seconds": 600, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 600, "app_switches": 1, "productivity_score": 1.0,
+                 "top_activity": "VS Code"},
+            30: {"focus_seconds": 0, "distraction_seconds": 300, "neutral_seconds": 0,
+                 "active_seconds": 300, "app_switches": 1, "productivity_score": 0.25,
+                 "top_activity": "Twitter"},
+        }
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        top_acts = summary["rescuetime"]["top_activities"]
+        assert len(top_acts) >= 1
+        # VS Code should appear first (2 windows vs 1)
+        assert top_acts[0] == "VS Code", f"Expected 'VS Code' first, got {top_acts}"
+
+    def test_rescuetime_at_most_three_top_activities(self):
+        """top_activities must contain at most 3 entries."""
+        rt = {
+            28: {"focus_seconds": 500, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 500, "app_switches": 0, "productivity_score": 1.0,
+                 "top_activity": "App1"},
+            29: {"focus_seconds": 400, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 400, "app_switches": 0, "productivity_score": 1.0,
+                 "top_activity": "App2"},
+            30: {"focus_seconds": 300, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 300, "app_switches": 0, "productivity_score": 1.0,
+                 "top_activity": "App3"},
+            31: {"focus_seconds": 200, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 200, "app_switches": 0, "productivity_score": 1.0,
+                 "top_activity": "App4"},
+        }
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert len(summary["rescuetime"]["top_activities"]) <= 3
+
+    def test_rescuetime_rt_windows_count(self):
+        """rt_windows must equal the number of working-hour windows with active_seconds > 0."""
+        rt = self._make_rt_windows([28, 29, 30])  # 3 working-hour windows with RT data
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert summary["rescuetime"]["rt_windows"] == 3
+
+    def test_rescuetime_zero_active_seconds_excluded(self):
+        """Windows with active_seconds=0 must not be counted in the RT summary."""
+        rt = {
+            28: {"focus_seconds": 0, "distraction_seconds": 0, "neutral_seconds": 0,
+                 "active_seconds": 0, "app_switches": 0, "productivity_score": None,
+                 "top_activity": None},
+        }
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        # Zero-active windows don't count → no RT section
+        assert "rescuetime" not in summary
+
+    def test_rescuetime_distraction_minutes_correct(self):
+        """distraction_minutes must equal sum of distraction_seconds / 60."""
+        # 3 windows × 120 distraction_seconds = 360s = 6.0 min
+        rt = self._make_rt_windows([28, 29, 30], distraction_s=120)
+        windows = build_windows("2026-03-13", SAMPLE_WHOOP, {"events": []}, {}, rt)
+        summary = summarize_day(windows)
+        assert summary["rescuetime"]["distraction_minutes"] == pytest.approx(6.0, abs=0.2)

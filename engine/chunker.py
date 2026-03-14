@@ -26,6 +26,26 @@ v1.3 — is_active_window + accurate FDI filtering:
   - focus_quality.active_windows: count of active working-hour windows
   - focus_quality.peak_focus_hour: hour of day with best active FDI
     (useful for "your best focus window" reporting in Intuition)
+
+v1.5 — RescueTime daily summary in summarize_day():
+  When RescueTime data is present in any window, summarize_day() now
+  aggregates a `rescuetime` section in the daily summary:
+  - focus_minutes: total time in productive/very productive apps (working hrs)
+  - distraction_minutes: total time in distracting apps (working hrs)
+  - neutral_minutes: neutral app time (working hrs)
+  - active_minutes: total computer-on time (working hrs)
+  - productive_pct: focus_minutes / active_minutes (0–100), None if no activity
+  - top_activities: up to 3 most-frequent top_activity strings seen in windows
+  - rt_windows: number of windows with RescueTime data (active_seconds > 0)
+
+  These stats are written to rolling.json alongside the existing calendar/
+  slack/whoop sections, giving the weekly Intuition report and future ML
+  model access to cumulative computer-productivity signals — "how many
+  hours of focused work did David have this week?"
+
+  When no RescueTime data is present (API key not configured), the
+  `rescuetime` key is omitted from the summary entirely so the schema
+  remains backward-compatible with pre-RT days.
 """
 
 import sys
@@ -212,6 +232,10 @@ def summarize_day(windows: list[dict]) -> dict:
     This is the accurate FDI signal — averaging FDI over all working-hour
     windows including idle ones inflates the score because idle windows
     return FDI=1.0 (no disruption ≠ deep focus).
+
+    v1.5: adds rescuetime section with aggregated computer-time stats when
+    RescueTime data is present.  Omitted entirely when no RT data was collected
+    so the schema stays backward-compatible with pre-RT days.
     """
     if not windows:
         return {}
@@ -258,7 +282,54 @@ def summarize_day(windows: list[dict]) -> dict:
                 peak_focus_fdi = round(h_avg, 4)
                 peak_focus_hour = h
 
-    return {
+    # ── RescueTime daily aggregate (v1.5) ────────────────────────────────────
+    # Aggregate computer-time stats from all working-hour windows that have
+    # RescueTime data.  Only included in the summary when at least one
+    # working-hour window has an RT record (active_seconds > 0).
+    #
+    # We accumulate over working hours only (7am–10pm) to exclude night-time
+    # idle activity that doesn't represent cognitive work.
+    rt_working_windows = [
+        w for w in working
+        if w.get("rescuetime") is not None
+        and w["rescuetime"].get("active_seconds", 0) > 0
+    ]
+
+    if rt_working_windows:
+        rt_focus_secs = sum(w["rescuetime"]["focus_seconds"] for w in rt_working_windows)
+        rt_distraction_secs = sum(w["rescuetime"]["distraction_seconds"] for w in rt_working_windows)
+        rt_neutral_secs = sum(w["rescuetime"]["neutral_seconds"] for w in rt_working_windows)
+        rt_active_secs = sum(w["rescuetime"]["active_seconds"] for w in rt_working_windows)
+
+        # Productive percentage: focus time as a fraction of active computer time.
+        # None if no active computer time was recorded (shouldn't happen here, but safe).
+        productive_pct: Optional[float] = (
+            round(100.0 * rt_focus_secs / rt_active_secs, 1)
+            if rt_active_secs > 0 else None
+        )
+
+        # Top activities: collect non-None top_activity strings, rank by frequency.
+        from collections import Counter
+        activity_counts: Counter = Counter(
+            w["rescuetime"]["top_activity"]
+            for w in rt_working_windows
+            if w["rescuetime"].get("top_activity")
+        )
+        top_activities = [act for act, _ in activity_counts.most_common(3)]
+
+        rescuetime_summary: Optional[dict] = {
+            "focus_minutes": round(rt_focus_secs / 60, 1),
+            "distraction_minutes": round(rt_distraction_secs / 60, 1),
+            "neutral_minutes": round(rt_neutral_secs / 60, 1),
+            "active_minutes": round(rt_active_secs / 60, 1),
+            "productive_pct": productive_pct,
+            "top_activities": top_activities,
+            "rt_windows": len(rt_working_windows),
+        }
+    else:
+        rescuetime_summary = None
+
+    summary = {
         "date": windows[0]["date"] if windows else None,
         "working_hours_analyzed": len(working),
         "total_windows": len(windows),
@@ -300,3 +371,11 @@ def summarize_day(windows: list[dict]) -> dict:
             "sleep_performance": windows[0]["whoop"].get("sleep_performance"),
         },
     }
+
+    # v1.5: only include rescuetime section when RT data was actually collected.
+    # Omitting it (rather than setting to None/empty) keeps rolling.json clean
+    # and avoids confusing downstream code that checks for key presence.
+    if rescuetime_summary is not None:
+        summary["rescuetime"] = rescuetime_summary
+
+    return summary
