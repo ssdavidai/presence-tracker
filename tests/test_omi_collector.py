@@ -184,7 +184,7 @@ class TestCollect:
         assert 36 in result  # 9:12 → window 36
         w = result[36]
         assert w["conversation_active"] is True
-        assert w["word_count"] == 8  # "Hello world this is a test of the system"
+        assert w["word_count"] == 9  # "Hello world this is a test of the system" = 9 words
         assert w["speech_seconds"] == 171.3  # rounded
         assert w["audio_seconds"] == 251.9
         assert w["sessions_count"] == 1
