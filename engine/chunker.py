@@ -5,6 +5,27 @@ Assembles all collected signals into 96 × 15-minute observation windows
 for a given day, then computes derived metrics for each window.
 
 Output: list of window dicts, written to data/chunks/YYYY-MM-DD.jsonl
+
+v1.3 — is_active_window + accurate FDI filtering:
+  Added `is_active_window` to window metadata.  A window is active when
+  at least one behavioral signal is present: in_meeting, Slack messages,
+  or RescueTime computer activity.
+
+  This flag is critical for meaningful FDI analytics.  Without it, idle
+  windows (no meetings, no Slack, no computer use) all return FDI=1.0
+  because there is literally no disruption — but that 1.0 does NOT mean
+  deep focused work; it means nothing was measured.  Averaging FDI over
+  all working-hour windows (most of which can be idle, especially in
+  non-meeting blocks) produces a falsely inflated daily FDI score.
+
+  summarize_day() now computes two FDI statistics:
+  - metrics_avg.focus_depth_index: all working-hour windows (unchanged,
+    for backward compatibility)
+  - focus_quality.active_fdi: FDI averaged over active windows only
+    (the accurate signal for "how deep was focus when actually working?")
+  - focus_quality.active_windows: count of active working-hour windows
+  - focus_quality.peak_focus_hour: hour of day with best active FDI
+    (useful for "your best focus window" reporting in Intuition)
 """
 
 import sys
@@ -127,6 +148,23 @@ def build_windows(
             **({"rescuetime": rescuetime_signals} if rescuetime_signals else {}),
         })
 
+        # ── Active window detection ───────────────────────────────────────
+        # A window is "active" when at least one behavioral signal is present.
+        # This distinguishes genuine idle periods (sleep, away-from-keyboard)
+        # from deep-focus working periods that happen to have no interruptions.
+        #
+        # Why this matters:
+        # FDI=1.0 for idle windows is mathematically correct (zero disruption)
+        # but analytically misleading — it inflates daily average FDI.  The
+        # `is_active_window` flag lets downstream code filter to only windows
+        # where David was actually engaged, making FDI stats meaningful.
+        rt_active_secs = (rescuetime_signals or {}).get("active_seconds", 0)
+        is_active = (
+            cal_signals["in_meeting"]
+            or slack_signals["total_messages"] > 0
+            or rt_active_secs > 0
+        )
+
         # ── Metadata ──────────────────────────────────────────────────────
         sources = []
         if whoop_data.get("recovery_score") is not None:
@@ -154,6 +192,7 @@ def build_windows(
                 "hour_of_day": hour,
                 "minute_of_hour": minute,
                 "is_working_hours": WORKING_HOURS_START <= hour < WORKING_HOURS_END,
+                "is_active_window": is_active,
                 "sources_available": sources,
             },
         }
@@ -165,12 +204,26 @@ def build_windows(
 def summarize_day(windows: list[dict]) -> dict:
     """
     Compute daily summary statistics from the 96 windows.
+
+    v1.3: adds focus_quality section with FDI computed over active windows only.
+    Active windows are those where at least one behavioral signal is present
+    (in_meeting, Slack messages, or RescueTime computer activity).
+
+    This is the accurate FDI signal — averaging FDI over all working-hour
+    windows including idle ones inflates the score because idle windows
+    return FDI=1.0 (no disruption ≠ deep focus).
     """
     if not windows:
         return {}
 
     # Working hours only (filter for analysis relevance)
     working = [w for w in windows if w["metadata"]["is_working_hours"]]
+
+    # Active working-hour windows: behavioral signal was present
+    active_working = [
+        w for w in working
+        if w["metadata"].get("is_active_window", False)
+    ]
 
     def avg(vals: list) -> Optional[float]:
         vals = [v for v in vals if v is not None]
@@ -186,6 +239,25 @@ def summarize_day(windows: list[dict]) -> dict:
     csc_vals = [w["metrics"]["context_switch_cost"] for w in working]
     ras_vals = [w["metrics"]["recovery_alignment_score"] for w in windows]
 
+    # Active-window FDI stats — the meaningful signal for "how focused was David?"
+    active_fdi_vals = [w["metrics"]["focus_depth_index"] for w in active_working]
+
+    # Best focus hour: hour of day with highest mean FDI over active working windows
+    # (grouped by hour, minimum 2 active windows in that hour to be reliable)
+    from collections import defaultdict
+    hour_fdi: dict[int, list[float]] = defaultdict(list)
+    for w in active_working:
+        hour_fdi[w["metadata"]["hour_of_day"]].append(w["metrics"]["focus_depth_index"])
+
+    peak_focus_hour: Optional[int] = None
+    peak_focus_fdi: Optional[float] = None
+    for h, fdi_list in hour_fdi.items():
+        if len(fdi_list) >= 2:
+            h_avg = sum(fdi_list) / len(fdi_list)
+            if peak_focus_fdi is None or h_avg > peak_focus_fdi:
+                peak_focus_fdi = round(h_avg, 4)
+                peak_focus_hour = h
+
     return {
         "date": windows[0]["date"] if windows else None,
         "working_hours_analyzed": len(working),
@@ -200,6 +272,16 @@ def summarize_day(windows: list[dict]) -> dict:
         "metrics_peak": {
             "cognitive_load_score": maximum(cls_vals),
             "focus_depth_index": maximum(fdi_vals),
+        },
+        # v1.3: accurate FDI over active (behaviorally engaged) windows only.
+        # active_fdi is the signal to use for "how focused was David when working?"
+        # The metrics_avg.focus_depth_index includes idle windows (returns 1.0)
+        # and is kept for backward compatibility only.
+        "focus_quality": {
+            "active_fdi": avg(active_fdi_vals),          # True focus depth (active windows only)
+            "active_windows": len(active_working),        # Windows with behavioral signal
+            "peak_focus_hour": peak_focus_hour,           # Hour with best FDI (int, or None)
+            "peak_focus_fdi": peak_focus_fdi,             # FDI at peak hour
         },
         "calendar": {
             # Count actual meeting time as windows × 15 min (avoids double-counting duration)
