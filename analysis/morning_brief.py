@@ -6,6 +6,7 @@ Sends David a morning Slack DM at 07:00 Budapest time with:
 - A capacity label and day-planning recommendation
 - Yesterday's cognitive load as context
 - A scheduling suggestion based on physiological state
+- Multi-day trend context (HRV streaks, overcapacity streaks, recovery momentum)
 
 This is the forward-looking complement to the end-of-day digest.
 The digest tells you how the day went; the morning brief tells you
@@ -15,11 +16,26 @@ Architecture:
     1. Collect WHOOP data for today (WHOOP posts last night's data by ~6am)
     2. Load yesterday's daily summary from the store (if available)
     3. Compute readiness tier and recommendation
-    4. Send DM to David
+    4. Compute multi-day trend context from rolling summary
+    5. Send DM to David
 
 Design principle: actionable specificity.
 Generic "rest today" advice is useless. The brief gives David one
 concrete scheduling action based on the actual numbers.
+
+v1.5 — Multi-day trend context in morning brief:
+    The morning brief now incorporates the same trend-detection engine
+    used by the daily digest.  When the rolling summary has ≥ 2 days of
+    history, the brief surfaces the most significant pattern:
+    - HRV decline/improvement streaks (signals accumulating stress or recovery)
+    - Consecutive above-capacity days (accumulated strain warning)
+    - Recovery score decline streaks (sleep/stress management signal)
+    - CLS above/below personal baseline (load-pacing context)
+
+    This closes the gap where the digest would flag "3 days of HRV decline"
+    at 23:45 — too late to change the day — but the morning brief would
+    show nothing.  Now David gets the same pattern intelligence at 07:00,
+    when it can actually influence scheduling decisions.
 """
 
 import json
@@ -190,6 +206,7 @@ def compute_morning_brief(
     whoop_data: dict,
     yesterday_summary: Optional[dict] = None,
     hrv_baseline: Optional[float] = None,
+    trend_context: Optional[dict] = None,
 ) -> dict:
     """
     Compute the morning brief data structure.
@@ -200,6 +217,11 @@ def compute_morning_brief(
     whoop_data : raw output from collectors.whoop.collect(today_date)
     yesterday_summary : daily summary dict from store (optional)
     hrv_baseline : 7-day average HRV in ms (optional, for relative context)
+    trend_context : multi-day trend dict from daily_digest.compute_trend_context()
+        (optional, v1.5).  When provided, surfaces the most significant
+        pattern (HRV streak, overcapacity streak, recovery decline) in the
+        morning message so David sees it before planning his day — not at
+        23:45 when the digest arrives.
 
     Returns
     -------
@@ -245,6 +267,7 @@ def compute_morning_brief(
             "meeting_minutes": yesterday_meeting_mins,
         },
         "hrv_baseline": hrv_baseline,
+        "trend_context": trend_context or {},
     }
 
 
@@ -339,6 +362,44 @@ def format_morning_brief_message(brief: dict) -> str:
             cls_parts.append(f"{y_mins}min meetings")
         lines.append("")
         lines.append(f"_Yesterday ({y_label}): {' · '.join(cls_parts)}_")
+
+    # ── Trend context (v1.5) ──
+    # Surface the most significant multi-day pattern so David sees it
+    # at 7am when it can influence scheduling, not at 23:45.
+    trend = brief.get("trend_context", {})
+    if trend and trend.get("days_of_data", 0) >= 2:
+        trend_lines = []
+
+        # HRV streak
+        hrv_trend = trend.get("hrv_trend")
+        hrv_streak = trend.get("hrv_streak_days", 0)
+        if hrv_trend == "declining" and hrv_streak >= 2:
+            trend_lines.append(f"⚠️ HRV declining {hrv_streak} days in a row")
+        elif hrv_trend == "improving" and hrv_streak >= 2:
+            trend_lines.append(f"✅ HRV improving {hrv_streak} days in a row")
+
+        # Overcapacity streak
+        oc_streak = trend.get("overcapacity_streak", 0)
+        if oc_streak >= 2:
+            trend_lines.append(f"⚠️ Above capacity {oc_streak} consecutive days")
+
+        # Recovery decline
+        rec_trend = trend.get("recovery_trend")
+        rec_streak = trend.get("recovery_streak_days", 0)
+        if rec_trend == "declining" and rec_streak >= 2:
+            trend_lines.append(f"⚠️ Recovery declining {rec_streak} days in a row")
+
+        # CLS vs baseline (cls_vs_baseline is a % value, e.g. 40.0 = 40% above)
+        cls_vs = trend.get("cls_vs_baseline")
+        if cls_vs is not None and abs(cls_vs) >= 25:
+            direction = "above" if cls_vs > 0 else "below"
+            trend_lines.append(f"Load {abs(cls_vs):.0f}% {direction} your 7-day baseline")
+
+        if trend_lines:
+            lines.append("")
+            lines.append("*Pattern:*")
+            for tl in trend_lines:
+                lines.append(f"  {tl}")
 
     return "\n".join(lines)
 
@@ -441,12 +502,23 @@ def send_morning_brief(date_str: Optional[str] = None) -> bool:
     except Exception as e:
         print(f"[morning] Could not compute HRV baseline: {e}", file=sys.stderr)
 
+    # ── Compute trend context (v1.5) ─────────────────────────────────────
+    trend_context = {}
+    try:
+        from analysis.daily_digest import compute_trend_context
+        trend_context = compute_trend_context(date_str, lookback_days=7)
+        days = trend_context.get("days_of_data", 0)
+        print(f"[morning] Trend context: {days} days of history")
+    except Exception as e:
+        print(f"[morning] Could not compute trend context: {e}", file=sys.stderr)
+
     # ── Compute and send ──────────────────────────────────────────────────
     brief = compute_morning_brief(
         today_date=date_str,
         whoop_data=whoop_data,
         yesterday_summary=yesterday_summary,
         hrv_baseline=hrv_baseline,
+        trend_context=trend_context,
     )
     message = format_morning_brief_message(brief)
 
@@ -500,7 +572,15 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    brief = compute_morning_brief(date_str, whoop_data, yesterday_summary, hrv_baseline)
+    # Trend context (v1.5)
+    trend_context = {}
+    try:
+        from analysis.daily_digest import compute_trend_context
+        trend_context = compute_trend_context(date_str, lookback_days=7)
+    except Exception:
+        pass
+
+    brief = compute_morning_brief(date_str, whoop_data, yesterday_summary, hrv_baseline, trend_context)
     message = format_morning_brief_message(brief)
 
     print("=" * 60)
