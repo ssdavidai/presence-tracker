@@ -402,3 +402,381 @@ class TestRecomputeDay:
         assert result["windows"] == 96
         # At least 3 windows had wrong metrics; is_active_window was None for 3 too
         assert result["changed"] >= 3
+
+
+# ─── Tests: Omi-aware _is_active_window (v2.0 fix) ───────────────────────────
+
+class TestIsActiveWindowOmi:
+    """
+    Omi conversation_active is a valid activity signal.
+
+    Before v5.8, _is_active_window() only checked calendar, Slack, and
+    RescueTime.  Windows where David was speaking (Omi active) but had no
+    meetings or Slack messages were incorrectly marked inactive, causing
+    active_fdi to exclude genuine work periods.
+    """
+
+    def setup_method(self):
+        self.mod = _import_recompute()
+
+    def _make_omi_window(
+        self,
+        index: int,
+        conversation_active: bool = True,
+        word_count: int = 200,
+        speech_seconds: float = 300.0,
+        in_meeting: bool = False,
+        slack_messages: int = 0,
+    ) -> dict:
+        """Build a window with Omi data for testing."""
+        w = _make_window(
+            index,
+            in_meeting=in_meeting,
+            slack_sent=slack_messages,
+        )
+        w["omi"] = {
+            "conversation_active": conversation_active,
+            "word_count": word_count,
+            "speech_seconds": speech_seconds,
+            "audio_seconds": speech_seconds * 1.1,
+            "sessions_count": 1,
+            "speech_ratio": 0.8,
+        }
+        return w
+
+    def test_omi_conversation_active_marks_window_active(self):
+        """Window with Omi conversation_active=True must be marked active."""
+        w = self._make_omi_window(36, conversation_active=True)
+        assert self.mod._is_active_window(w) is True
+
+    def test_omi_conversation_inactive_does_not_mark_active(self):
+        """Window with Omi conversation_active=False should not be marked active
+        on Omi alone (may still be active via other signals)."""
+        w = self._make_omi_window(36, conversation_active=False, in_meeting=False, slack_messages=0)
+        assert self.mod._is_active_window(w) is False
+
+    def test_omi_none_does_not_crash(self):
+        """Window with omi=None should not crash _is_active_window."""
+        w = _make_window(36)
+        w["omi"] = None
+        assert self.mod._is_active_window(w) is False
+
+    def test_omi_missing_key_does_not_crash(self):
+        """Window without omi key at all should work fine."""
+        w = _make_window(36)
+        assert "omi" not in w
+        assert self.mod._is_active_window(w) is False
+
+    def test_omi_wins_even_without_meeting_or_slack(self):
+        """
+        Omi speech with no calendar/Slack activity: window should be active.
+        This is the core correctness fix — Omi-only engagement windows must
+        not be discarded from active_fdi computation.
+        """
+        w = self._make_omi_window(
+            36,
+            conversation_active=True,
+            in_meeting=False,
+            slack_messages=0,
+        )
+        # No rescuetime either
+        assert self.mod._is_active_window(w) is True
+
+    def test_omi_false_with_slack_still_active(self):
+        """Omi inactive, but Slack messages present → window is active."""
+        w = self._make_omi_window(36, conversation_active=False, slack_messages=3)
+        assert self.mod._is_active_window(w) is True
+
+
+# ─── Tests: _compute_sources_available (v5.8 fix) ────────────────────────────
+
+class TestComputeSourcesAvailable:
+    """
+    sources_available must reflect actual window signals, not stale stored values.
+
+    Older JSONL files may have been written before certain sources were active.
+    Recomputation should refresh this list so downstream analytics correctly
+    identify which data sources contributed to each window.
+    """
+
+    def setup_method(self):
+        self.mod = _import_recompute()
+
+    def test_base_sources_always_present(self):
+        """whoop, calendar, slack are always in sources_available."""
+        w = _make_window(0)
+        sources = self.mod._compute_sources_available(w)
+        assert "whoop" in sources
+        assert "calendar" in sources
+        assert "slack" in sources
+
+    def test_rescuetime_added_when_active(self):
+        """RescueTime is added when active_seconds > 0."""
+        w = _make_window(36, rescuetime={"active_seconds": 300})
+        sources = self.mod._compute_sources_available(w)
+        assert "rescuetime" in sources
+
+    def test_rescuetime_omitted_when_zero(self):
+        """RescueTime is NOT added when active_seconds == 0."""
+        w = _make_window(36, rescuetime={"active_seconds": 0})
+        sources = self.mod._compute_sources_available(w)
+        assert "rescuetime" not in sources
+
+    def test_rescuetime_omitted_when_missing(self):
+        """RescueTime is NOT added when the key is missing."""
+        w = _make_window(36)
+        assert "rescuetime" not in w
+        sources = self.mod._compute_sources_available(w)
+        assert "rescuetime" not in sources
+
+    def test_omi_added_when_conversation_active(self):
+        """Omi is added to sources when conversation_active=True."""
+        w = _make_window(36)
+        w["omi"] = {
+            "conversation_active": True,
+            "word_count": 150,
+            "speech_seconds": 200.0,
+        }
+        sources = self.mod._compute_sources_available(w)
+        assert "omi" in sources
+
+    def test_omi_omitted_when_conversation_inactive(self):
+        """Omi is NOT added when conversation_active=False."""
+        w = _make_window(36)
+        w["omi"] = {
+            "conversation_active": False,
+            "word_count": 0,
+            "speech_seconds": 0.0,
+        }
+        sources = self.mod._compute_sources_available(w)
+        assert "omi" not in sources
+
+    def test_omi_omitted_when_none(self):
+        """Omi is NOT added when omi=None (no transcripts that day)."""
+        w = _make_window(36)
+        w["omi"] = None
+        sources = self.mod._compute_sources_available(w)
+        assert "omi" not in sources
+
+    def test_all_sources_present_when_all_active(self):
+        """All four sources listed when all signals present."""
+        w = _make_window(36, rescuetime={"active_seconds": 300})
+        w["omi"] = {"conversation_active": True, "word_count": 100, "speech_seconds": 150.0}
+        sources = self.mod._compute_sources_available(w)
+        assert set(sources) == {"whoop", "calendar", "slack", "rescuetime", "omi"}
+
+    def test_no_duplicates_in_sources(self):
+        """sources_available must not contain duplicate entries."""
+        w = _make_window(36, rescuetime={"active_seconds": 300})
+        w["omi"] = {"conversation_active": True, "word_count": 100, "speech_seconds": 150.0}
+        sources = self.mod._compute_sources_available(w)
+        assert len(sources) == len(set(sources))
+
+
+# ─── Tests: sources_available updated in recompute_window ────────────────────
+
+class TestSourcesAvailableUpdatedOnRecompute:
+    """
+    Verify that recompute_window updates sources_available when window signals
+    don't match the stored list (e.g. Omi was backfilled but sources_available
+    still shows the old pre-Omi list).
+    """
+
+    def setup_method(self):
+        self.mod = _import_recompute()
+
+    def test_omi_added_to_sources_on_recompute(self):
+        """
+        Window with Omi data but missing 'omi' in sources_available:
+        recompute_window must add it and include it in the diff.
+        """
+        w = _make_window(36)
+        # Simulate old stored data without omi in sources
+        w["metadata"]["sources_available"] = ["whoop", "calendar", "slack"]
+        w["omi"] = {
+            "conversation_active": True,
+            "word_count": 180,
+            "speech_seconds": 250.0,
+        }
+        updated, diff = self.mod.recompute_window(w)
+        assert "omi" in updated["metadata"]["sources_available"]
+        assert "sources_available" in diff
+
+    def test_rescuetime_added_to_sources_on_recompute(self):
+        """
+        Window with RescueTime data but missing 'rescuetime' in sources_available
+        must have it added during recompute.
+        """
+        w = _make_window(36, rescuetime={"active_seconds": 600})
+        w["metadata"]["sources_available"] = ["whoop", "calendar", "slack"]
+        updated, diff = self.mod.recompute_window(w)
+        assert "rescuetime" in updated["metadata"]["sources_available"]
+        assert "sources_available" in diff
+
+    def test_sources_unchanged_when_already_correct(self):
+        """
+        When sources_available already matches window signals, no diff.
+        """
+        from engine.metrics import compute_metrics
+        w = _make_window(36)
+        correct_sources = self.mod._compute_sources_available(w)
+        w["metadata"]["sources_available"] = correct_sources
+        correct_metrics = compute_metrics(w)
+        w["metrics"] = correct_metrics
+        w["metadata"]["is_active_window"] = self.mod._is_active_window(w)
+
+        updated, diff = self.mod.recompute_window(w)
+        assert "sources_available" not in diff
+
+    def test_stale_omi_source_not_removed_when_data_present(self):
+        """
+        If omi IS in sources AND the window has active Omi data,
+        omi stays in sources and no diff for sources_available.
+        """
+        from engine.metrics import compute_metrics
+        w = _make_window(36)
+        w["omi"] = {"conversation_active": True, "word_count": 100, "speech_seconds": 150.0}
+        correct_sources = self.mod._compute_sources_available(w)
+        assert "omi" in correct_sources
+        w["metadata"]["sources_available"] = correct_sources
+        correct_metrics = compute_metrics(w)
+        w["metrics"] = correct_metrics
+        w["metadata"]["is_active_window"] = self.mod._is_active_window(w)
+
+        updated, diff = self.mod.recompute_window(w)
+        sources_diff = diff.get("sources_available")
+        assert sources_diff is None, (
+            f"sources_available should not change when already correct; got diff: {sources_diff}"
+        )
+
+
+# ─── Tests: regenerate_dashboard flag ────────────────────────────────────────
+
+class TestRegenerateDashboard:
+    """
+    When --regenerate-dashboards is passed, recompute_day calls
+    analysis.dashboard.generate_dashboard() for days with changes.
+    """
+
+    def setup_method(self):
+        self.mod = _import_recompute()
+
+    def test_regenerate_called_when_changes_exist(self, tmp_path, monkeypatch):
+        """If a day has changed windows, generate_dashboard is called."""
+        import engine.store as store
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        monkeypatch.setattr(store, "SUMMARY_DIR", tmp_path)
+
+        calls = []
+
+        def fake_generate_dashboard(date_str):
+            calls.append(date_str)
+            return tmp_path / f"{date_str}.html"
+
+        monkeypatch.setattr(
+            "analysis.dashboard.generate_dashboard",
+            fake_generate_dashboard,
+        )
+
+        windows = [_make_window(i, cls_override=0.999) for i in range(96)]
+        store.write_day("2026-02-01", windows)
+
+        result = self.mod.recompute_day(
+            "2026-02-01",
+            dry_run=False,
+            quiet=True,
+            regenerate_dashboard=True,
+        )
+        assert "2026-02-01" in calls, "generate_dashboard should have been called"
+        assert "dashboard_regenerated" in result
+
+    def test_regenerate_not_called_when_no_changes(self, tmp_path, monkeypatch):
+        """If no windows changed, generate_dashboard is NOT called."""
+        import engine.store as store
+        from engine.metrics import compute_metrics
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        monkeypatch.setattr(store, "SUMMARY_DIR", tmp_path)
+
+        calls = []
+
+        def fake_generate_dashboard(date_str):
+            calls.append(date_str)
+            return tmp_path / f"{date_str}.html"
+
+        monkeypatch.setattr(
+            "analysis.dashboard.generate_dashboard",
+            fake_generate_dashboard,
+        )
+
+        # Write windows with already-correct metrics
+        windows = []
+        for i in range(96):
+            w = _make_window(i)
+            w["metrics"] = compute_metrics(w)
+            w["metadata"]["is_active_window"] = self.mod._is_active_window(w)
+            w["metadata"]["sources_available"] = self.mod._compute_sources_available(w)
+            windows.append(w)
+        store.write_day("2026-02-02", windows)
+
+        result = self.mod.recompute_day(
+            "2026-02-02",
+            dry_run=False,
+            quiet=True,
+            regenerate_dashboard=True,
+        )
+        assert len(calls) == 0, "generate_dashboard should NOT be called when no changes"
+        assert "dashboard_regenerated" not in result
+
+    def test_regenerate_not_called_in_dry_run(self, tmp_path, monkeypatch):
+        """In dry-run mode, generate_dashboard is never called."""
+        import engine.store as store
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        monkeypatch.setattr(store, "SUMMARY_DIR", tmp_path)
+
+        calls = []
+
+        def fake_generate_dashboard(date_str):
+            calls.append(date_str)
+            return tmp_path / f"{date_str}.html"
+
+        monkeypatch.setattr(
+            "analysis.dashboard.generate_dashboard",
+            fake_generate_dashboard,
+        )
+
+        windows = [_make_window(i, cls_override=0.999) for i in range(96)]
+        store.write_day("2026-02-03", windows)
+
+        self.mod.recompute_day(
+            "2026-02-03",
+            dry_run=True,
+            quiet=True,
+            regenerate_dashboard=True,
+        )
+        assert len(calls) == 0, "generate_dashboard must not be called in dry-run mode"
+
+    def test_dashboard_error_is_non_fatal(self, tmp_path, monkeypatch):
+        """If dashboard generation fails, recompute_day should not raise."""
+        import engine.store as store
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        monkeypatch.setattr(store, "SUMMARY_DIR", tmp_path)
+
+        def failing_generate(date_str):
+            raise RuntimeError("Simulated dashboard failure")
+
+        monkeypatch.setattr(
+            "analysis.dashboard.generate_dashboard",
+            failing_generate,
+        )
+
+        windows = [_make_window(i, cls_override=0.999) for i in range(10)]
+        store.write_day("2026-02-04", windows)
+
+        # Should not raise
+        result = self.mod.recompute_day(
+            "2026-02-04",
+            dry_run=False,
+            quiet=True,
+            regenerate_dashboard=True,
+        )
+        assert "dashboard_error" in result
