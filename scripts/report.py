@@ -14,6 +14,8 @@ Usage:
     python3 scripts/report.py --windows         # Include per-window table
     python3 scripts/report.py --compare 7       # Compare vs N-day average
     python3 scripts/report.py --trend 14        # Multi-day trend table (last N days)
+    python3 scripts/report.py --week            # Full terminal weekly summary (this week)
+    python3 scripts/report.py --week 2026-03-14 # Weekly summary ending on a specific date
 
 What it shows (full mode):
   - WHOOP physiological snapshot (recovery, HRV, sleep)
@@ -31,6 +33,18 @@ What --trend shows:
   WHOOP recovery, and CDI tier.  Lets David see at a glance how the week has
   been tracking, spot inflection points, and compare days without reading
   individual reports.
+
+What --week shows:
+  A full terminal weekly summary with:
+  - Per-day trend table (DPS, CLS, FDI, recovery)
+  - Week averages across all five cognitive metrics
+  - Week-over-week deltas vs the prior 7 days (with direction arrows)
+  - WHOOP weekly averages (recovery, HRV, sleep)
+  - Best and worst days by CLS and FDI
+  - Source coverage (how many days had WHOOP, Omi, RescueTime)
+  - Calendar and Slack totals for the week
+  This is the terminal complement to the weekly Slack DM — same data,
+  richer visual formatting, no API calls needed.
 
 Design:
   - No external dependencies — pure stdlib + project modules
@@ -53,6 +67,12 @@ Examples:
 
     # Multi-day trend table for the last 14 days
     python3 scripts/report.py --trend 14
+
+    # Full weekly terminal summary (this week)
+    python3 scripts/report.py --week
+
+    # Weekly summary for a specific week end date
+    python3 scripts/report.py --week 2026-03-14
 """
 
 import argparse
@@ -944,6 +964,325 @@ def print_trend(days: int = 14) -> None:
     print()
 
 
+def print_week(end_date_str: Optional[str] = None) -> None:
+    """
+    Print a rich terminal weekly presence summary.
+
+    Shows:
+      - Per-day trend table (DPS, CLS, FDI, RAS, recovery)
+      - Week averages and week-over-week deltas vs prior 7 days
+      - WHOOP weekly averages (recovery, HRV, sleep)
+      - Best / worst days by CLS (lighter = better) and FDI (higher = better)
+      - Source coverage (WHOOP / Omi / RescueTime days)
+      - Calendar meeting total and Slack volume
+
+    Designed as the terminal complement to the weekly Slack DM sent by
+    scripts/weekly_summary.py — same underlying data, terminal formatting.
+
+    Args:
+        end_date_str: Last day of the week (YYYY-MM-DD).
+                      Defaults to today if not provided.
+    """
+    # ── Import weekly_summary helpers ─────────────────────────────────────────
+    # weekly_summary.py is a script, not a module, so import via importlib
+    # to avoid the __name__=="__main__" guard running.
+    import importlib.util as _ilu
+
+    _ws_path = project_root / "scripts" / "weekly_summary.py"
+    _spec = _ilu.spec_from_file_location("weekly_summary", _ws_path)
+    _ws = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_ws)
+
+    if not end_date_str:
+        end_date_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Validate
+    try:
+        end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+    except ValueError:
+        print(f"  Invalid date: {end_date_str}", file=sys.stderr)
+        return
+
+    # Compute summary (this week + prior week for deltas)
+    summary = _ws.compute_weekly_summary(end_date_str)
+    tw = summary["this_week"]
+    lw = summary["last_week"]
+    deltas = summary.get("deltas", {})
+    whoop_deltas = summary.get("whoop_deltas", {})
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    start_dt = end_dt - timedelta(days=6)
+    week_label = f"{start_dt.strftime('%b %-d')} → {end_dt.strftime('%b %-d')}"
+    tw_n = tw.get("days_with_data", 0)
+
+    print()
+    print(_c(f"  Presence Tracker — Weekly Summary  ", BOLD) + _c(f"({week_label})", DIM))
+    print(_c(f"  {tw_n} day{'s' if tw_n != 1 else ''} tracked this week", DIM))
+    print()
+
+    if tw_n == 0:
+        print(_c("  No data available for this week.", DIM))
+        return
+
+    # ── Per-day trend table ───────────────────────────────────────────────────
+    # Re-use the existing print_trend() but only for this week's date range
+    available = list_available_dates()
+    week_dates = tw.get("dates", [])
+    week_rows = []
+    for date_str in week_dates:
+        if date_str not in available:
+            continue
+        rep = build_report(date_str)
+        if rep is None:
+            continue
+        m = rep["metrics"]
+        w = rep["whoop"]
+        f = rep["focus"]
+        dps_data = rep.get("presence_score")
+        dps = dps_data["dps"] if dps_data else None
+        week_rows.append({
+            "date": date_str,
+            "dow": datetime.strptime(date_str, "%Y-%m-%d").strftime("%a"),
+            "dps": dps,
+            "cls": m.get("cls"),
+            "fdi": f.get("active_fdi") or m.get("fdi"),
+            "ras": m.get("ras"),
+            "recovery": w.get("recovery_score"),
+            "hrv": w.get("hrv_rmssd_milli"),
+            "sleep": w.get("sleep_hours"),
+            "meeting_mins": rep["calendar"].get("meeting_minutes", 0),
+        })
+
+    if week_rows:
+        print(_c("  ① Daily Breakdown", BOLD))
+        print()
+        hdr = (
+            f"  {'Date':<10}  {'Day':<3}  "
+            f"{'DPS':>6}  {'CLS':>8}  {'FDI':>8}  {'RAS':>8}  "
+            f"{'Recov':>5}  {'HRV':>5}  {'Sleep':>5}  {'Mtg':>4}"
+        )
+        print(_c(hdr, DIM))
+        print(_c("  " + "─" * 80, DIM))
+
+        for row in week_rows:
+            dps_val = row["dps"]
+            dps_str = _dps_emoji(dps_val)
+
+            def _col(val: Optional[float], high_is_bad: bool = False) -> str:
+                if val is None:
+                    return f"{'—':>8}"
+                bar = _sparkbar(val, 5, high_is_bad=high_is_bad)
+                return f"{bar} {val * 100:3.0f}%"
+
+            cls_col = _col(row["cls"], high_is_bad=True)
+            fdi_col = _col(row["fdi"])
+            ras_col = _col(row["ras"])
+
+            rec = row["recovery"]
+            rec_s = f"{rec:.0f}%" if rec is not None else "  —"
+            hrv = row["hrv"]
+            hrv_s = f"{hrv:.0f}ms" if hrv is not None else "  —"
+            slp = row["sleep"]
+            slp_s = f"{slp:.1f}h" if slp is not None else "  —"
+            mtg = row["meeting_mins"]
+            mtg_s = f"{mtg}m" if mtg else "  —"
+
+            line = (
+                f"  {row['date']}  {row['dow']:<3}  "
+                f"{dps_str}  {cls_col}  {fdi_col}  {ras_col}  "
+                f"{rec_s:>5}  {hrv_s:>5}  {slp_s:>5}  {mtg_s:>4}"
+            )
+            print(line)
+
+        print()
+
+    # ── Week averages + deltas ────────────────────────────────────────────────
+    tw_m = tw.get("metrics") or {}
+    tw_w = tw.get("whoop") or {}
+    lw_m = lw.get("metrics") or {}
+    lw_w = lw.get("whoop") or {}
+    lw_n  = lw.get("days_with_data", 0)
+
+    def _fmt_pct(val: Optional[float]) -> str:
+        if val is None:
+            return " —  "
+        return f"{round(val * 100):>3}%"
+
+    def _fmt_delta_pct(delta: Optional[float], good_direction: str = "up") -> str:
+        """Format a ±delta in percentage points with colour."""
+        if delta is None or abs(delta * 100) < 0.5:
+            return _c("  →  ", DIM)
+        scaled = delta * 100
+        arrow = "↑" if scaled > 0 else "↓"
+        sign = "+" if scaled > 0 else "−"
+        val_str = f"{sign}{abs(round(scaled))}%"
+        if good_direction == "up":
+            colour = GREEN if scaled > 0 else RED
+        else:
+            colour = GREEN if scaled < 0 else RED
+        return _c(f"  {arrow}{val_str}", colour)
+
+    print(_c("  ② Cognitive Metrics (working-hours avg)", BOLD))
+    print()
+
+    def _metric_row(label: str, this_val: Optional[float], delta_val: Optional[float],
+                    bar_width: int = 8, high_is_bad: bool = False) -> str:
+        bar = _bar(this_val or 0, width=bar_width, high_is_bad=high_is_bad)
+        pct = _fmt_pct(this_val)
+        delta_s = _fmt_delta_pct(delta_val, good_direction="down" if high_is_bad else "up")
+        return f"  {label:<5} {bar}  {pct}{delta_s}"
+
+    active_fdi = tw_m.get("active_fdi") or tw_m.get("fdi")
+    active_fdi_delta = deltas.get("active_fdi") or deltas.get("fdi")
+
+    print(_metric_row("CLS",  tw_m.get("cls"),        deltas.get("cls"),        high_is_bad=True))
+    print(_metric_row("FDI",  active_fdi,              active_fdi_delta))
+    print(_metric_row("SDI",  tw_m.get("sdi"),         deltas.get("sdi"),        high_is_bad=True))
+    print(_metric_row("CSC",  tw_m.get("csc"),         deltas.get("csc"),        high_is_bad=True))
+    print(_metric_row("RAS",  tw_m.get("ras"),         deltas.get("ras")))
+
+    if lw_n > 0:
+        print(_c(f"  (Δ vs prior week, {lw_n} days)", DIM))
+    print()
+
+    # ── WHOOP weekly averages ─────────────────────────────────────────────────
+    print(_c("  ③ WHOOP (weekly avg)", BOLD))
+    print()
+
+    def _whoop_row(label: str, this_val: Optional[float], delta_val: Optional[float],
+                   scale: float = 1.0, suffix: str = "", good_direction: str = "up") -> str:
+        if this_val is None:
+            return f"  {label:<12} —"
+        val_s = f"{this_val * scale:.0f}{suffix}"
+
+        if delta_val is not None and abs(delta_val * scale) >= 0.5:
+            scaled = delta_val * scale
+            arrow = "↑" if scaled > 0 else "↓"
+            sign = "+" if scaled > 0 else "−"
+            delta_str = f"{sign}{abs(round(scaled))}{suffix}"
+            if good_direction == "up":
+                colour = GREEN if scaled > 0 else RED
+            else:
+                colour = GREEN if scaled < 0 else RED
+            delta_s = _c(f"  {arrow}{delta_str}", colour)
+        else:
+            delta_s = _c("  →", DIM)
+
+        return f"  {label:<12} {val_s}{delta_s}"
+
+    print(_whoop_row("Recovery",   tw_w.get("recovery"),   whoop_deltas.get("recovery"),
+                     scale=1.0, suffix="%"))
+    print(_whoop_row("HRV",        tw_w.get("hrv"),        whoop_deltas.get("hrv"),
+                     scale=1.0, suffix="ms"))
+    print(_whoop_row("Sleep",      tw_w.get("sleep_hours"), whoop_deltas.get("sleep_hours"),
+                     scale=1.0, suffix="h"))
+    print(_whoop_row("Sleep perf", tw_w.get("sleep_performance"),
+                     whoop_deltas.get("sleep_performance"), scale=1.0, suffix="%"))
+    print()
+
+    # ── Best / worst days ─────────────────────────────────────────────────────
+    cls_ex = tw.get("cls_extremes", {})
+    fdi_ex = tw.get("fdi_extremes", {})
+
+    def _day_label(date_str: Optional[str]) -> str:
+        if not date_str:
+            return "—"
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %b %-d")
+        except Exception:
+            return date_str
+
+    print(_c("  ④ Best / Worst Days", BOLD))
+    print()
+
+    # In weekly_summary extremes: "best" = max value, "worst" = min value.
+    # For CLS (lower is better): "best" = highest CLS (heaviest day),
+    #                             "worst" = lowest CLS (lightest day).
+    cls_lightest = cls_ex.get("worst")  # min CLS = lightest cognitive day
+    cls_heaviest = cls_ex.get("best")   # max CLS = heaviest cognitive day
+    if cls_lightest and cls_heaviest:
+        print(f"  Lightest day (CLS ↓):   {_c(_day_label(cls_lightest['date']), GREEN)}"
+              f"  {cls_lightest['value']*100:.0f}%")
+        print(f"  Heaviest day (CLS ↑):   {_c(_day_label(cls_heaviest['date']), RED)}"
+              f"  {cls_heaviest['value']*100:.0f}%")
+
+    fdi_best = fdi_ex.get("best")    # max FDI = best focus day
+    fdi_worst = fdi_ex.get("worst")  # min FDI = most fragmented day
+    if fdi_best and fdi_worst:
+        print(f"  Best focus (FDI ↑):     {_c(_day_label(fdi_best['date']), GREEN)}"
+              f"  {fdi_best['value']*100:.0f}%")
+        print(f"  Most fragmented (FDI ↓): {_c(_day_label(fdi_worst['date']), RED)}"
+              f"  {fdi_worst['value']*100:.0f}%")
+
+    peak_hour = tw.get("peak_focus_hour")
+    if peak_hour is not None:
+        suffix = "am" if peak_hour < 12 else "pm"
+        h12 = peak_hour if peak_hour <= 12 else peak_hour - 12
+        print(f"  Peak focus hour:       {h12}{suffix}")
+
+    print()
+
+    # ── Calendar & Slack totals ───────────────────────────────────────────────
+    cal = tw.get("calendar_stats", {})
+    slack = tw.get("slack_stats", {})
+    total_mtg_mins = cal.get("total_meeting_minutes", 0)
+    total_sent = slack.get("total_sent", 0)
+    total_received = slack.get("total_received", 0)
+
+    print(_c("  ⑤ Activity Totals", BOLD))
+    print()
+    if total_mtg_mins:
+        mtg_hrs = total_mtg_mins // 60
+        mtg_rem = total_mtg_mins % 60
+        mtg_str = f"{mtg_hrs}h{mtg_rem:02d}min" if mtg_rem else f"{mtg_hrs}h"
+        if not mtg_hrs:
+            mtg_str = f"{mtg_rem}min"
+        print(f"  Meetings:   {mtg_str}")
+    else:
+        print("  Meetings:   —")
+
+    if total_sent or total_received:
+        print(f"  Slack:      {total_sent} sent  /  {total_received} received")
+    else:
+        print("  Slack:      —")
+
+    # ── Source coverage ───────────────────────────────────────────────────────
+    coverage = tw.get("source_coverage", {})
+    rt = tw.get("rt_stats", {})
+    omi = tw.get("omi_stats", {})
+
+    print()
+    print(_c("  ⑥ Data Coverage", BOLD))
+    print()
+    total_days = 7  # full week
+
+    def _cov_bar(days_present: int, total: int = tw_n) -> str:
+        frac = days_present / total if total > 0 else 0
+        filled = round(frac * 5)
+        return "▓" * filled + "░" * (5 - filled)
+
+    sources = [
+        ("whoop",       "WHOOP"),
+        ("calendar",    "Calendar"),
+        ("slack",       "Slack"),
+        ("rescuetime",  "RescueTime"),
+        ("omi",         "Omi"),
+    ]
+    for key, label in sources:
+        days_n = coverage.get(key, 0)
+        bar = _cov_bar(days_n)
+        note = ""
+        if key == "rescuetime" and rt.get("days_tracked", 0) > 0:
+            focus_h = rt.get("total_focus_minutes", 0) / 60
+            note = f"  {focus_h:.1f}h focus"
+        elif key == "omi" and omi.get("total_words", 0) > 0:
+            note = f"  {omi['total_words']:,} words spoken"
+        colour = GREEN if days_n > 0 else DIM
+        print(_c(f"  {bar}  {label:<12} {days_n}/{tw_n} days{note}", colour))
+
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Presence Tracker — Per-Day Terminal Report",
@@ -977,7 +1316,16 @@ def main() -> None:
         help="Show compact multi-day trend table for the last N available days "
              "(default: all available if -t given without a value)",
     )
+    parser.add_argument(
+        "--week", action="store_true",
+        help="Show full terminal weekly summary (last 7 days ending on DATE, or today)",
+    )
     args = parser.parse_args()
+
+    # ── Week mode ─────────────────────────────────────────────────────────────
+    if args.week:
+        print_week(end_date_str=args.date)
+        return
 
     # ── Trend mode — no date argument needed ─────────────────────────────────
     if args.trend:

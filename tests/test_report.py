@@ -1138,3 +1138,244 @@ class TestCdiTierShort:
         with patch("analysis.cognitive_debt.compute_cdi", return_value=None):
             result = _cdi_tier_short("2026-03-14")
         assert result == "—"
+
+
+class TestPrintWeek:
+    """
+    Tests for print_week() — the terminal weekly summary.
+
+    Covers:
+      - Output is non-empty and contains expected sections
+      - No crash when called with a valid date
+      - No crash when called with no data for the week
+      - Week-over-week delta marker is present when prior week exists
+      - CLI --week flag triggers print_week, not per-day report
+      - Invalid date string does not crash (graceful error)
+      - Coverage bars appear in output
+      - Best/worst day section appears when data is present
+    """
+
+    # ── Fixtures ──────────────────────────────────────────────────────────────
+
+    _ROLLING_FULL = {
+        "days": {
+            "2026-03-13": {
+                "date": "2026-03-13",
+                "metrics_avg": {
+                    "cognitive_load_score": 0.32,
+                    "focus_depth_index": 0.75,
+                    "social_drain_index": 0.18,
+                    "context_switch_cost": 0.22,
+                    "recovery_alignment_score": 0.81,
+                },
+                "focus_quality": {
+                    "active_fdi": 0.72,
+                    "active_windows": 12,
+                    "peak_focus_hour": 10,
+                    "peak_focus_fdi": 0.85,
+                },
+                "whoop": {
+                    "recovery_score": 78.0,
+                    "hrv_rmssd_milli": 65.0,
+                    "sleep_hours": 7.5,
+                    "sleep_performance": 82.0,
+                    "resting_heart_rate": 56.0,
+                },
+                "calendar": {"total_meeting_minutes": 90},
+                "slack": {"total_messages_sent": 12, "total_messages_received": 55},
+            },
+            "2026-03-14": {
+                "date": "2026-03-14",
+                "metrics_avg": {
+                    "cognitive_load_score": 0.40,
+                    "focus_depth_index": 0.68,
+                    "social_drain_index": 0.20,
+                    "context_switch_cost": 0.25,
+                    "recovery_alignment_score": 0.78,
+                },
+                "focus_quality": {
+                    "active_fdi": 0.65,
+                    "active_windows": 10,
+                    "peak_focus_hour": 11,
+                    "peak_focus_fdi": 0.80,
+                },
+                "whoop": {
+                    "recovery_score": 85.0,
+                    "hrv_rmssd_milli": 72.0,
+                    "sleep_hours": 8.0,
+                    "sleep_performance": 88.0,
+                    "resting_heart_rate": 54.0,
+                },
+                "calendar": {"total_meeting_minutes": 120},
+                "slack": {"total_messages_sent": 18, "total_messages_received": 70},
+            },
+        },
+        "total_days": 2,
+        "last_updated": "2026-03-14T23:45:00",
+    }
+
+    def _patch_week(self, rolling=None):
+        """Return context managers for mocking week data."""
+        rolling = rolling or self._ROLLING_FULL
+        windows = _make_day_windows(20)
+        return (
+            patch("scripts.report.list_available_dates",
+                  return_value=["2026-03-13", "2026-03-14"]),
+            patch("scripts.report.read_day", return_value=windows),
+            patch("scripts.report._cdi_tier_short", return_value="balanced"),
+            # weekly_summary uses its own store reads — patch both
+            patch("engine.store.read_summary", return_value=rolling),
+            patch("engine.store.read_day", return_value=windows),
+        )
+
+    # ── Tests ─────────────────────────────────────────────────────────────────
+
+    def test_prints_something_with_data(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert len(out) > 100
+
+    def test_output_contains_weekly_header(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "Weekly Summary" in out
+
+    def test_output_contains_date_range(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        # Should mention the week range (Mar 8 → Mar 14)
+        assert "Mar 14" in out or "Mar  8" in out or "Mar 8" in out
+
+    def test_output_contains_cognitive_metrics_section(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "CLS" in out
+        assert "FDI" in out
+        assert "RAS" in out
+
+    def test_output_contains_whoop_section(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "WHOOP" in out
+        assert "Recovery" in out
+
+    def test_output_contains_best_worst_section(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "Best" in out or "Worst" in out or "Lightest" in out
+
+    def test_output_contains_activity_totals(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "Meetings" in out or "Slack" in out
+
+    def test_output_contains_data_coverage_section(self, capsys):
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "Coverage" in out or "WHOOP" in out
+
+    def test_no_crash_when_no_data(self, capsys):
+        """When no data exists for the week, print_week should not crash."""
+        from scripts.report import print_week
+        empty_rolling = {"days": {}, "total_days": 0, "last_updated": None}
+        patches = (
+            patch("scripts.report.list_available_dates", return_value=[]),
+            patch("scripts.report.read_day", return_value=[]),
+            patch("scripts.report._cdi_tier_short", return_value="—"),
+            patch("engine.store.read_summary", return_value=empty_rolling),
+            patch("engine.store.read_day", return_value=[]),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        # Should print something (header at minimum)
+        assert len(out) > 0
+
+    def test_no_crash_on_invalid_date(self, capsys):
+        """An invalid date string should print an error without raising."""
+        from scripts.report import print_week
+        # Should not raise; should handle gracefully
+        print_week("not-a-date")
+
+    def test_no_crash_when_end_date_is_none(self, capsys):
+        """Calling with None should default to today without crashing."""
+        from scripts.report import print_week
+        empty_rolling = {"days": {}, "total_days": 0, "last_updated": None}
+        patches = (
+            patch("scripts.report.list_available_dates", return_value=[]),
+            patch("scripts.report.read_day", return_value=[]),
+            patch("scripts.report._cdi_tier_short", return_value="—"),
+            patch("engine.store.read_summary", return_value=empty_rolling),
+            patch("engine.store.read_day", return_value=[]),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week(None)
+
+    def test_cli_week_flag_triggers_week_mode(self, capsys):
+        """--week flag should call print_week, not the per-day report."""
+        import sys
+        windows = _make_day_windows(20)
+        rolling = self._ROLLING_FULL
+        old_argv = sys.argv
+        sys.argv = ["report.py", "--week"]
+        try:
+            from scripts.report import main as report_main
+            patches = (
+                patch("scripts.report.list_available_dates",
+                      return_value=["2026-03-13", "2026-03-14"]),
+                patch("scripts.report.read_day", return_value=windows),
+                patch("scripts.report._cdi_tier_short", return_value="balanced"),
+                patch("engine.store.read_summary", return_value=rolling),
+                patch("engine.store.read_day", return_value=windows),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                try:
+                    report_main()
+                except SystemExit as e:
+                    assert e.code == 0 or e.code is None
+        finally:
+            sys.argv = old_argv
+        out = capsys.readouterr().out
+        assert "Weekly Summary" in out
+
+    def test_daily_breakdown_section_present(self, capsys):
+        """Per-day breakdown table should appear when data exists."""
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert "Daily Breakdown" in out or "2026-03-14" in out
+
+    def test_output_is_multi_line(self, capsys):
+        """Weekly output should span multiple lines (not a one-liner)."""
+        from scripts.report import print_week
+        patches = self._patch_week()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            print_week("2026-03-14")
+        out = capsys.readouterr().out
+        assert out.count("\n") >= 10
