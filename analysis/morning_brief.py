@@ -53,7 +53,11 @@ from config import GATEWAY_URL, GATEWAY_TOKEN, SLACK_DM_CHANNEL
 
 # ─── Readiness tiers ──────────────────────────────────────────────────────────
 
-def _readiness_tier(recovery: Optional[float], hrv: Optional[float]) -> str:
+def _readiness_tier(
+    recovery: Optional[float],
+    hrv: Optional[float],
+    baseline=None,
+) -> str:
     """
     Classify today's physiological readiness into a tier.
 
@@ -64,23 +68,20 @@ def _readiness_tier(recovery: Optional[float], hrv: Optional[float]) -> str:
     moderate recovery with low HRV is treated as 'low' because the
     autonomic nervous system is signalling stress even if WHOOP's composite
     is in the moderate range.
+
+    v6.0 — Personal baseline integration:
+        When a PersonalBaseline with is_personal=True is supplied, the tier
+        thresholds are anchored to David's own percentile distribution rather
+        than fixed WHOOP/population norms.  This makes the tiers meaningful
+        relative to his own physiology:
+          - "Peak" = top quintile of his days (not WHOOP's generic 80%)
+          - "Low HRV" = below his personal 20th percentile (not population 45ms)
+
+        Falls back to population norms when baseline is None or not personal
+        (i.e., insufficient data — fewer than 14 days of history).
     """
-    if recovery is None:
-        return "unknown"
-
-    # HRV modifier: flag autonomic stress even when recovery looks moderate
-    hrv_stressed = hrv is not None and hrv < 45  # well below typical population median
-
-    if recovery >= 80:
-        return "peak" if not hrv_stressed else "good"
-    elif recovery >= 67:
-        return "good" if not hrv_stressed else "moderate"
-    elif recovery >= 50:
-        return "moderate" if not hrv_stressed else "low"
-    elif recovery >= 33:
-        return "low"
-    else:
-        return "recovery"
+    from analysis.personal_baseline import readiness_tier_personal
+    return readiness_tier_personal(recovery, hrv, baseline)
 
 
 def _tier_label(tier: str) -> str:
@@ -207,6 +208,7 @@ def compute_morning_brief(
     yesterday_summary: Optional[dict] = None,
     hrv_baseline: Optional[float] = None,
     trend_context: Optional[dict] = None,
+    personal_baseline=None,
 ) -> dict:
     """
     Compute the morning brief data structure.
@@ -222,6 +224,11 @@ def compute_morning_brief(
         pattern (HRV streak, overcapacity streak, recovery decline) in the
         morning message so David sees it before planning his day — not at
         23:45 when the digest arrives.
+    personal_baseline : PersonalBaseline instance from analysis.personal_baseline
+        (optional, v6.0).  When supplied and is_personal=True, readiness tiers
+        are anchored to David's own percentile distribution rather than
+        population-norm WHOOP thresholds.  Falls back gracefully to population
+        norms when None or when insufficient data exists.
 
     Returns
     -------
@@ -242,7 +249,7 @@ def compute_morning_brief(
         yesterday_cls = yesterday_summary.get("metrics_avg", {}).get("cognitive_load_score")
         yesterday_meeting_mins = yesterday_summary.get("calendar", {}).get("total_meeting_minutes")
 
-    tier = _readiness_tier(recovery, hrv)
+    tier = _readiness_tier(recovery, hrv, baseline=personal_baseline)
     recommendation = _tier_recommendation(
         tier, recovery, hrv, yesterday_cls, yesterday_meeting_mins
     )
@@ -268,6 +275,13 @@ def compute_morning_brief(
         },
         "hrv_baseline": hrv_baseline,
         "trend_context": trend_context or {},
+        # v6.0: personal baseline metadata (for display/debugging)
+        "personal_baseline": {
+            "is_personal": getattr(personal_baseline, "is_personal", False),
+            "days_of_data": getattr(personal_baseline, "days_of_data", 0),
+            "recovery_p80": getattr(personal_baseline, "recovery_p80", None),
+            "hrv_p20": getattr(personal_baseline, "hrv_p20", None),
+        } if personal_baseline is not None else None,
     }
 
 
@@ -512,6 +526,29 @@ def send_morning_brief(date_str: Optional[str] = None) -> bool:
     except Exception as e:
         print(f"[morning] Could not compute trend context: {e}", file=sys.stderr)
 
+    # ── Compute personal baseline (v6.0) ─────────────────────────────────
+    # Derives David's personal HRV/recovery percentile thresholds from
+    # accumulated data.  Falls back to population norms when < 14 days
+    # of history exist.  The baseline is passed into compute_morning_brief
+    # which uses it in _readiness_tier via readiness_tier_personal().
+    personal_baseline = None
+    try:
+        from analysis.personal_baseline import get_personal_baseline
+        personal_baseline = get_personal_baseline(days=90)
+        if personal_baseline.is_personal:
+            print(
+                f"[morning] Personal baseline: {personal_baseline.days_of_data} days, "
+                f"recovery_p80={personal_baseline.recovery_p80:.0f}%, "
+                f"hrv_p20={personal_baseline.hrv_p20:.0f}ms"
+            )
+        else:
+            print(
+                f"[morning] Personal baseline: {personal_baseline.days_of_data} days "
+                f"(population norms — need {14} more days)"
+            )
+    except Exception as e:
+        print(f"[morning] Could not compute personal baseline: {e}", file=sys.stderr)
+
     # ── Compute and send ──────────────────────────────────────────────────
     brief = compute_morning_brief(
         today_date=date_str,
@@ -519,6 +556,7 @@ def send_morning_brief(date_str: Optional[str] = None) -> bool:
         yesterday_summary=yesterday_summary,
         hrv_baseline=hrv_baseline,
         trend_context=trend_context,
+        personal_baseline=personal_baseline,
     )
     message = format_morning_brief_message(brief)
 
