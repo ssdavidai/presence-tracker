@@ -200,6 +200,15 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
     except Exception as e:
         print(f"[presence] Daily digest failed (non-fatal): {e}", file=sys.stderr)
 
+    # ── Step 10: Generate HTML dashboard ─────────────────────────────────
+    try:
+        from analysis.dashboard import generate_dashboard
+        dashboard_path = generate_dashboard(date_str)
+        if not quiet:
+            print(f"[presence] Dashboard: {dashboard_path}")
+    except Exception as e:
+        print(f"[presence] Dashboard generation failed (non-fatal): {e}", file=sys.stderr)
+
     # Daily alert check
     if recovery is not None and recovery < 50 and avg_cls and avg_cls > 0.70:
         from analysis.intuition import run_daily_alert

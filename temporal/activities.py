@@ -38,6 +38,23 @@ async def send_morning_readiness_brief(date_str: str) -> bool:
 
 
 @activity.defn
+async def generate_daily_dashboard(date_str: str) -> str:
+    """Generate the daily HTML presence dashboard.
+
+    Returns the path to the generated HTML file.
+    Runs after ingest_day so the data is already written.
+    """
+    from analysis.dashboard import generate_dashboard
+    try:
+        path = generate_dashboard(date_str)
+        activity.logger.info(f"Dashboard generated: {path}")
+        return str(path)
+    except Exception as e:
+        activity.logger.error(f"Dashboard generation failed: {e}")
+        return ""
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         run_weekly_intuition,
         send_morning_readiness_brief,
         notify_slack_presence,
+        generate_daily_dashboard,
     )
 
 RETRY_POLICY = RetryPolicy(
@@ -55,9 +56,18 @@ class DailyIngestionWorkflow:
             avg_cls = summary.get("metrics_avg", {}).get("cognitive_load_score", 0)
             meeting_mins = summary.get("calendar", {}).get("total_meeting_minutes", 0)
 
+            # Generate HTML dashboard after data is ingested
+            dashboard_path = await workflow.execute_activity(
+                generate_daily_dashboard,
+                args=[date_str],
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
             msg = (
                 f"[PRESENCE] Daily ingestion complete — {date_str}\n"
                 f"Recovery: {recovery}% | Avg CLS: {avg_cls:.2f} | Meetings: {meeting_mins}min"
+                + (f"\nDashboard: {dashboard_path}" if dashboard_path else "")
             )
 
             await workflow.execute_activity(
