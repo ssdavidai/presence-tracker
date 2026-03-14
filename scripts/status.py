@@ -18,10 +18,12 @@ Exit codes:
 Output covers:
   ① Data collection — how many days, date range, source coverage
   ② Recent metrics — 7-day average CLS, FDI, SDI, RAS trends
-  ③ WHOOP snapshot — latest recovery, HRV, sleep
-  ④ ML model layer — training status, days until ready
-  ⑤ Anomaly history — last triggered alert (if any)
-  ⑥ Dashboard files — presence of HTML reports
+  ③ Cognitive Debt Index — 14-day accumulated fatigue level
+  ④ WHOOP snapshot — latest recovery, HRV, sleep
+  ⑤ Data source coverage — WHOOP, Calendar, Slack, RescueTime, Omi
+  ⑥ ML model layer — training status, days until ready
+  ⑦ Anomaly history — last triggered alert (if any)
+  ⑧ Dashboard files — presence of HTML reports
 """
 
 import argparse
@@ -201,6 +203,24 @@ def _gather_status() -> dict:
     # Active sources across last 7 days
     source_days = len(dates[-7:]) if dates else 0
 
+    # Cognitive Debt Index (v8.0)
+    cdi_status: dict = {}
+    try:
+        from analysis.cognitive_debt import compute_cdi, format_cdi_line
+        if latest_date:
+            debt = compute_cdi(latest_date)
+            if debt.is_meaningful:
+                cdi_status = {
+                    "cdi": debt.cdi,
+                    "tier": debt.tier,
+                    "days_in_deficit": debt.days_in_deficit,
+                    "days_used": debt.days_used,
+                    "trend_5d": debt.trend_5d,
+                    "line": format_cdi_line(debt),
+                }
+    except Exception:
+        pass
+
     return {
         "data": {
             "n_days": n_days,
@@ -228,6 +248,7 @@ def _gather_status() -> dict:
             "latest": dashboard_files[-1].name if dashboard_files else None,
         },
         "anomalies": last_anomaly,
+        "cognitive_debt": cdi_status,
     }
 
 
@@ -318,7 +339,7 @@ def _fmt_metrics_section(metrics: dict) -> list[str]:
 
 def _fmt_whoop_section(whoop: dict, date: str) -> list[str]:
     """Format WHOOP snapshot."""
-    lines = [_bold(f"③ WHOOP Snapshot ({date or 'n/a'})")]
+    lines = [_bold(f"④ WHOOP Snapshot ({date or 'n/a'})")]
 
     recovery = whoop.get("recovery_score")
     hrv = whoop.get("hrv_rmssd_milli")
@@ -343,7 +364,7 @@ def _fmt_whoop_section(whoop: dict, date: str) -> list[str]:
 
 def _fmt_sources_section(sources: dict) -> list[str]:
     """Format data source coverage."""
-    lines = [_bold("④ Data Source Coverage (last 7 days)")]
+    lines = [_bold("⑤ Data Source Coverage (last 7 days)")]
 
     coverage = sources.get("coverage", {})
     days = sources.get("source_days", 0)
@@ -370,7 +391,7 @@ def _fmt_sources_section(sources: dict) -> list[str]:
 
 def _fmt_ml_section(ml: dict) -> list[str]:
     """Format ML model status."""
-    lines = [_bold("⑤ ML Model Layer")]
+    lines = [_bold("⑥ ML Model Layer")]
 
     n = ml.get("days_of_data", 0)
     ml_min = ml.get("min_days_required", 60)
@@ -398,7 +419,7 @@ def _fmt_ml_section(ml: dict) -> list[str]:
 
 def _fmt_anomaly_section(anomaly: dict) -> list[str]:
     """Format anomaly alert status."""
-    lines = [_bold("⑥ Anomaly Alerts")]
+    lines = [_bold("⑦ Anomaly Alerts")]
 
     if not anomaly:
         lines.append(f"  {_green('✓ No anomalies triggered (latest day)')} ")
@@ -417,9 +438,55 @@ def _fmt_anomaly_section(anomaly: dict) -> list[str]:
     return lines
 
 
+def _fmt_cognitive_debt_section(cdi: dict) -> list[str]:
+    """Format Cognitive Debt Index status."""
+    lines = [_bold("③ Cognitive Debt Index (14-day)")]
+
+    if not cdi:
+        lines.append(f"  {_dim('Not yet meaningful (need ≥ 3 days of data)')}")
+        return lines
+
+    score = cdi.get("cdi", 50.0)
+    tier = cdi.get("tier", "balanced")
+    days_deficit = cdi.get("days_in_deficit", 0)
+    days_used = cdi.get("days_used", 0)
+    trend_5d = cdi.get("trend_5d")
+
+    # Colour by tier
+    tier_colour = {
+        "surplus":  _green,
+        "balanced": _green,
+        "loading":  _yellow,
+        "fatigued": _red,
+        "critical": _red,
+    }.get(tier, _dim)
+
+    tier_emoji = {
+        "surplus":  "🟢",
+        "balanced": "🟡",
+        "loading":  "🟠",
+        "fatigued": "🔴",
+        "critical": "🚨",
+    }.get(tier, "⚪")
+
+    score_str = tier_colour(f"{score:.0f}/100")
+    lines.append(f"  CDI: {score_str}  {tier_emoji} {tier.capitalize()}")
+    lines.append(f"  Deficit days: {days_deficit} of last {days_used} days")
+
+    if trend_5d is not None:
+        if trend_5d > 0.02:
+            lines.append(f"  5d trend: {_red('↑ fatigue accumulating')}")
+        elif trend_5d < -0.02:
+            lines.append(f"  5d trend: {_green('↓ recovering')}")
+        else:
+            lines.append(f"  5d trend: stable")
+
+    return lines
+
+
 def _fmt_dashboard_section(dashboard: dict) -> list[str]:
     """Format dashboard file status."""
-    lines = [_bold("⑦ HTML Dashboards")]
+    lines = [_bold("⑧ HTML Dashboards")]
 
     count = dashboard.get("count", 0)
     latest = dashboard.get("latest")
@@ -457,6 +524,7 @@ def print_status(no_colour: bool = False) -> int:
     sections = [
         _fmt_data_section(status["data"]),
         _fmt_metrics_section(status["metrics"]),
+        _fmt_cognitive_debt_section(status.get("cognitive_debt", {})),
         _fmt_whoop_section(status["whoop"], latest_date or ""),
         _fmt_sources_section(status["sources"]),
         _fmt_ml_section(status["ml"]),

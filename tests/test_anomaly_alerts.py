@@ -332,7 +332,8 @@ class TestCheckAnomalies:
     def test_no_alerts_any_triggered_false(self):
         with patch("analysis.anomaly_alerts.detect_cls_spike", return_value=None), \
              patch("analysis.anomaly_alerts.detect_fdi_collapse", return_value=None), \
-             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None):
+             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None), \
+             patch("analysis.anomaly_alerts.detect_cognitive_debt_alert", return_value=None):
             result = check_anomalies(self.TODAY)
         assert result["any_triggered"] is False
         assert result["date"] == self.TODAY
@@ -342,7 +343,8 @@ class TestCheckAnomalies:
                      "threshold": 0.40, "days_used": 7}
         with patch("analysis.anomaly_alerts.detect_cls_spike", return_value=cls_alert), \
              patch("analysis.anomaly_alerts.detect_fdi_collapse", return_value=None), \
-             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None):
+             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None), \
+             patch("analysis.anomaly_alerts.detect_cognitive_debt_alert", return_value=None):
             result = check_anomalies(self.TODAY)
         assert result["any_triggered"] is True
         assert result["alerts"]["cls_spike"] is not None
@@ -354,9 +356,12 @@ class TestCheckAnomalies:
                      "threshold": 0.5, "days_used": 5}
         fdi_alert = {"today_fdi": 0.3, "baseline_fdi": 0.7, "drop_pct": 0.57, "days_used": 7}
         streak_alert = {"streak_days": 4, "ras_values": [0.3]*4, "avg_ras": 0.3}
+        cdi_alert = {"cdi": 79.0, "tier": "fatigued", "days_in_deficit": 8, "days_used": 10,
+                     "trend_5d": 0.05, "alert_message": "test CDI alert"}
         with patch("analysis.anomaly_alerts.detect_cls_spike", return_value=cls_alert), \
              patch("analysis.anomaly_alerts.detect_fdi_collapse", return_value=fdi_alert), \
-             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=streak_alert):
+             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=streak_alert), \
+             patch("analysis.anomaly_alerts.detect_cognitive_debt_alert", return_value=cdi_alert):
             result = check_anomalies(self.TODAY)
         assert result["any_triggered"] is True
         assert all(v is not None for v in result["alerts"].values())
@@ -364,18 +369,23 @@ class TestCheckAnomalies:
     def test_result_schema(self):
         with patch("analysis.anomaly_alerts.detect_cls_spike", return_value=None), \
              patch("analysis.anomaly_alerts.detect_fdi_collapse", return_value=None), \
-             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None):
+             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None), \
+             patch("analysis.anomaly_alerts.detect_cognitive_debt_alert", return_value=None):
             result = check_anomalies(self.TODAY)
         assert "date" in result
         assert "alerts" in result
         assert "any_triggered" in result
-        assert set(result["alerts"].keys()) == {"cls_spike", "fdi_collapse", "recovery_streak"}
+        # v5.1: cognitive_debt is a fourth alert key
+        assert set(result["alerts"].keys()) == {
+            "cls_spike", "fdi_collapse", "recovery_streak", "cognitive_debt"
+        }
 
     def test_defaults_to_today_date(self):
         """When called with no date, result date == today."""
         with patch("analysis.anomaly_alerts.detect_cls_spike", return_value=None), \
              patch("analysis.anomaly_alerts.detect_fdi_collapse", return_value=None), \
-             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None):
+             patch("analysis.anomaly_alerts.detect_recovery_misalignment_streak", return_value=None), \
+             patch("analysis.anomaly_alerts.detect_cognitive_debt_alert", return_value=None):
             result = check_anomalies()
         today = datetime.now().strftime("%Y-%m-%d")
         assert result["date"] == today

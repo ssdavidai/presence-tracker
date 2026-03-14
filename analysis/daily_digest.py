@@ -632,6 +632,26 @@ def compute_digest(windows: list[dict]) -> dict:
     # Provides the temporal shape of the day — not just average and peak.
     hourly_cls_curve = compute_hourly_cls_curve(windows)
 
+    # ── Cognitive Debt Index (v1.7) ─────────────────────────────────────────
+    # Multi-day accumulated fatigue index.  Computes CDI for today using the
+    # rolling summary store.  Gracefully returns None when insufficient data
+    # (< 3 days) — the digest section is omitted in that case.
+    cognitive_debt = None
+    try:
+        from analysis.cognitive_debt import compute_cdi, format_cdi_line
+        _cdi = compute_cdi(date_str)
+        if _cdi.is_meaningful:
+            cognitive_debt = {
+                "cdi": _cdi.cdi,
+                "tier": _cdi.tier,
+                "trend_5d": _cdi.trend_5d,
+                "days_in_deficit": _cdi.days_in_deficit,
+                "days_used": _cdi.days_used,
+                "line": format_cdi_line(_cdi),
+            }
+    except Exception:
+        pass  # CDI is non-critical; never crash the digest
+
     return {
         "date": date_str,
         "whoop": {
@@ -669,6 +689,8 @@ def compute_digest(windows: list[dict]) -> dict:
         # v1.6: Peak focus hour (None when no active windows or FDI < threshold)
         "peak_focus_hour": peak_focus_hour,
         "peak_focus_fdi": peak_focus_fdi,
+        # v1.7: Cognitive Debt Index (None when < 3 days of history)
+        "cognitive_debt": cognitive_debt,
     }
 
 
@@ -859,6 +881,7 @@ def format_digest_message(digest: dict) -> str:
     omi = digest.get("omi")               # None when no Omi conversations (v1.6)
     peak_focus_hour = digest.get("peak_focus_hour")   # v1.6
     peak_focus_fdi = digest.get("peak_focus_fdi")     # v1.6
+    cognitive_debt = digest.get("cognitive_debt")     # v1.7: CDI dict or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1019,6 +1042,16 @@ def format_digest_message(digest: dict) -> str:
         if trend_parts:
             lines.append("")
             lines.append("_Trends: " + "  ·  ".join(trend_parts) + "_")
+
+    # ── Cognitive Debt Index (v1.7) ───────────────────────────────────────
+    # Multi-day accumulated fatigue indicator — shown when meaningful (≥ 3 days).
+    # Surfaces the CDI line computed in compute_digest().
+    # Example: "🟠 CDI 63/100 — Loading (5 deficit days in 14d, trend ↑ fatigue)"
+    if cognitive_debt:
+        cdi_line = cognitive_debt.get("line", "")
+        if cdi_line:
+            lines.append("")
+            lines.append(f"_{cdi_line}_")
 
     # ── Insight ──
     if insight:

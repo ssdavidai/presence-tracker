@@ -551,9 +551,9 @@ class TestPrintStatus:
         mock_gather.return_value = _make_status(n_days=5, age_days=0)
         print_status()
         captured = capsys.readouterr()
-        # All 7 section numbers should appear
-        for i in range(1, 8):
-            assert str(i) in captured.out, f"Section ① ... ⑦ missing: {i}"
+        # All 8 section numbers should appear (③ = CDI added in v8.0)
+        for i in range(1, 9):
+            assert str(i) in captured.out, f"Section ① ... ⑧ missing: {i}"
 
     @patch("scripts.status._gather_status")
     def test_exit_code_matches_health(self, mock_gather, capsys):

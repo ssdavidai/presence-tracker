@@ -271,6 +271,50 @@ def detect_recovery_misalignment_streak(today: str) -> Optional[dict]:
 
 # ─── Aggregated check ─────────────────────────────────────────────────────────
 
+def detect_cognitive_debt_alert(date_str: str) -> Optional[dict]:
+    """
+    Check whether the Cognitive Debt Index is in a fatigued/critical state.
+
+    Returns a dict when CDI is fatigued (≥ 70) or critical (≥ 85) and the
+    result is meaningful (≥ 3 days of data).  Returns None otherwise.
+
+    This is a fourth anomaly check — complementary to the existing CLS spike,
+    FDI collapse, and recovery streak alerts.  While those detect single-day
+    events or streaks of one metric, CDI captures sustained multi-day
+    accumulation across all signals.  A week of moderately elevated CLS with
+    mediocre WHOOP recovery might not trigger any single-metric alert but will
+    push the CDI into fatigued territory.
+
+    Returns:
+    {
+      "cdi": float,
+      "tier": "fatigued" | "critical",
+      "days_in_deficit": int,
+      "days_used": int,
+      "trend_5d": float or None,
+      "alert_message": str,   ← formatted by format_cdi_alert()
+    }
+    """
+    try:
+        from analysis.cognitive_debt import compute_cdi, format_cdi_alert
+        debt = compute_cdi(date_str)
+        if not debt.is_meaningful:
+            return None
+        if debt.tier not in ("fatigued", "critical"):
+            return None
+        alert_message = format_cdi_alert(debt)
+        return {
+            "cdi": debt.cdi,
+            "tier": debt.tier,
+            "days_in_deficit": debt.days_in_deficit,
+            "days_used": debt.days_used,
+            "trend_5d": debt.trend_5d,
+            "alert_message": alert_message,
+        }
+    except Exception:
+        return None
+
+
 def check_anomalies(date_str: str = None) -> dict:
     """
     Run all anomaly checks for date_str (defaults to today).
@@ -282,6 +326,7 @@ def check_anomalies(date_str: str = None) -> dict:
         "cls_spike": {...} or None,
         "fdi_collapse": {...} or None,
         "recovery_streak": {...} or None,
+        "cognitive_debt": {...} or None,   ← v5.1: CDI fatigue alert
       },
       "any_triggered": bool,
     }
@@ -292,11 +337,13 @@ def check_anomalies(date_str: str = None) -> dict:
     cls_spike = detect_cls_spike(date_str)
     fdi_collapse = detect_fdi_collapse(date_str)
     recovery_streak = detect_recovery_misalignment_streak(date_str)
+    cognitive_debt = detect_cognitive_debt_alert(date_str)
 
     alerts = {
         "cls_spike": cls_spike,
         "fdi_collapse": fdi_collapse,
         "recovery_streak": recovery_streak,
+        "cognitive_debt": cognitive_debt,
     }
 
     return {
@@ -353,6 +400,12 @@ def format_alert_message(result: dict) -> str:
             f"   You've been operating above your physiological capacity for {n} consecutive days. "
             f"Consider a recovery day."
         )
+
+    cdi_alert = alerts.get("cognitive_debt")
+    if cdi_alert:
+        alert_msg = cdi_alert.get("alert_message", "")
+        if alert_msg:
+            lines.append(alert_msg)
 
     if not lines:
         return ""

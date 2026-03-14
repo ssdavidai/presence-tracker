@@ -612,7 +612,33 @@ def compute_morning_brief(
         } if personal_baseline is not None else None,
         # v7.0: today's calendar analysis (for display)
         "today_calendar": cal_analysis,
+        # v8.0: Cognitive Debt Index — multi-day accumulated fatigue
+        # Computed here so the morning brief can warn David before the day starts.
+        # Returns None when < 3 days of history exist (graceful degradation).
+        "cognitive_debt": _compute_cdi_for_brief(today_date),
     }
+
+
+def _compute_cdi_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute CDI for the morning brief.  Returns None when not meaningful.
+    Wraps the CDI module with full exception isolation.
+    """
+    try:
+        from analysis.cognitive_debt import compute_cdi, format_cdi_line
+        debt = compute_cdi(date_str)
+        if not debt.is_meaningful:
+            return None
+        return {
+            "cdi": debt.cdi,
+            "tier": debt.tier,
+            "trend_5d": debt.trend_5d,
+            "days_in_deficit": debt.days_in_deficit,
+            "days_used": debt.days_used,
+            "line": format_cdi_line(debt),
+        }
+    except Exception:
+        return None
 
 
 # ─── Message formatter ────────────────────────────────────────────────────────
@@ -744,6 +770,17 @@ def format_morning_brief_message(brief: dict) -> str:
             lines.append("*Pattern:*")
             for tl in trend_lines:
                 lines.append(f"  {tl}")
+
+    # ── Cognitive Debt Index (v8.0) ──────────────────────────────────────
+    # Multi-day accumulated fatigue — shown when meaningful (≥ 3 days data).
+    # Morning is the right time to see CDI: it can influence whether to protect
+    # the day for recovery or push forward on high-demand work.
+    cognitive_debt = brief.get("cognitive_debt")
+    if cognitive_debt:
+        cdi_line = cognitive_debt.get("line", "")
+        if cdi_line:
+            lines.append("")
+            lines.append(f"_{cdi_line}_")
 
     # ── Today's Schedule (v7.0) ───────────────────────────────────────────
     # Show what's on the calendar today so David can see the shape of his day.
