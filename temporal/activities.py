@@ -55,6 +55,29 @@ async def generate_daily_dashboard(date_str: str) -> str:
 
 
 @activity.defn
+async def run_anomaly_alerts(date_str: str) -> dict:
+    """Run multi-source anomaly checks and send Slack DM if anything triggered.
+
+    Returns the check_anomalies() result dict (safe to log / inspect).
+    """
+    from analysis.anomaly_alerts import check_anomalies, send_anomaly_alerts
+    try:
+        result = check_anomalies(date_str)
+        if result["any_triggered"]:
+            n = send_anomaly_alerts(date_str)
+            activity.logger.info(
+                f"Anomaly alerts: {n} DM sent — "
+                + ", ".join(k for k, v in result["alerts"].items() if v)
+            )
+        else:
+            activity.logger.info(f"Anomaly alerts: no triggers for {date_str}")
+        return result
+    except Exception as e:
+        activity.logger.error(f"Anomaly alert check failed: {e}")
+        return {"date": date_str, "alerts": {}, "any_triggered": False, "error": str(e)}
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

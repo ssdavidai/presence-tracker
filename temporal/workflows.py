@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
         send_morning_readiness_brief,
         notify_slack_presence,
         generate_daily_dashboard,
+        run_anomaly_alerts,
     )
 
 RETRY_POLICY = RetryPolicy(
@@ -64,10 +65,22 @@ class DailyIngestionWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
+            # Run anomaly alerts — sends Slack DM if thresholds exceeded
+            anomaly_result = await workflow.execute_activity(
+                run_anomaly_alerts,
+                args=[date_str],
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            triggered = [
+                k for k, v in anomaly_result.get("alerts", {}).items() if v
+            ]
+
             msg = (
                 f"[PRESENCE] Daily ingestion complete — {date_str}\n"
                 f"Recovery: {recovery}% | Avg CLS: {avg_cls:.2f} | Meetings: {meeting_mins}min"
                 + (f"\nDashboard: {dashboard_path}" if dashboard_path else "")
+                + (f"\nAnomalies: {', '.join(triggered)}" if triggered else "")
             )
 
             await workflow.execute_activity(
