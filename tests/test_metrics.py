@@ -205,19 +205,73 @@ class TestContextSwitchCost:
         assert csc == 0.0
 
     def test_short_meeting_costs_more_than_long(self):
+        # v1.6: social meetings (attendees > 1) — short costs more than long
         csc_short = context_switch_cost(
             in_meeting=True,
             meeting_duration_minutes=10,
             slack_channels_active=1,
             is_short_meeting=True,
+            meeting_attendees=4,
         )
         csc_long = context_switch_cost(
             in_meeting=True,
             meeting_duration_minutes=90,
             slack_channels_active=1,
             is_short_meeting=False,
+            meeting_attendees=4,
         )
         assert csc_short > csc_long, f"Short meeting should cost more: {csc_short} vs {csc_long}"
+
+    def test_solo_block_has_zero_csc(self):
+        # v1.6: solo calendar blocks (attendees <= 1) incur no context-switch cost.
+        # A dedicated focus block is the opposite of fragmentation.
+        csc_solo_long = context_switch_cost(
+            in_meeting=True,
+            meeting_duration_minutes=180,
+            slack_channels_active=0,
+            is_short_meeting=False,
+            meeting_attendees=0,
+        )
+        assert csc_solo_long == 0.0, f"Solo long block should have zero CSC, got {csc_solo_long}"
+
+        csc_solo_short = context_switch_cost(
+            in_meeting=True,
+            meeting_duration_minutes=10,
+            slack_channels_active=0,
+            is_short_meeting=True,
+            meeting_attendees=1,
+        )
+        assert csc_solo_short == 0.0, f"Solo short block should have zero CSC, got {csc_solo_short}"
+
+    def test_solo_block_csc_lower_than_social_meeting(self):
+        # v1.6: a solo block always has lower CSC than an equivalent social meeting.
+        csc_solo = context_switch_cost(
+            in_meeting=True,
+            meeting_duration_minutes=30,
+            slack_channels_active=2,
+            is_short_meeting=False,
+            meeting_attendees=1,
+        )
+        csc_social = context_switch_cost(
+            in_meeting=True,
+            meeting_duration_minutes=30,
+            slack_channels_active=2,
+            is_short_meeting=False,
+            meeting_attendees=5,
+        )
+        assert csc_solo < csc_social, (
+            f"Solo block CSC ({csc_solo}) should be less than social meeting CSC ({csc_social})"
+        )
+
+    def test_backward_compat_no_attendees_kwarg(self):
+        # v1.6: callers without meeting_attendees kwarg default to 0 (solo = zero CSC).
+        # This is the safe conservative direction (no false CSC inflation).
+        csc = context_switch_cost(
+            in_meeting=True,
+            meeting_duration_minutes=30,
+            slack_channels_active=0,
+        )
+        assert csc == 0.0, f"No attendees kwarg should default to 0 (solo, zero CSC), got {csc}"
 
     def test_output_range(self):
         for args in [

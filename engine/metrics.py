@@ -86,6 +86,38 @@ v1.5 — Solo-meeting fix extended to CLS:
     - RAS improves correctly for focused days (was penalised by inflated CLS)
 
   Consistency: CLS, FDI, and SDI now all use the same is_social_meeting gate.
+
+v1.6 — Solo-meeting fix extended to CSC:
+  Context Switch Cost (CSC) now also distinguishes social meetings from solo
+  calendar blocks, completing the consistency fix across all five metrics.
+
+  Problem: CSC's meeting_switch and fragmentation components fired for ANY
+  in_meeting=True window.  A solo calendar block (baby-swimming class, focus
+  session, personal reminder) was getting CSC ≈ 0.25–0.60 depending on duration,
+  despite zero context-switching overhead.
+
+  The v1.4/v1.5 series fixed SDI, FDI, and CLS but left CSC incorrectly
+  treating solo blocks as context-switching events.  A dedicated focus block
+  (in_meeting=True, attendees ≤ 1) is the opposite of a context switch — it
+  is sustained, undivided engagement.
+
+  CSC fix: meeting_switch and fragmentation now only fire for social meetings
+    (meeting_attendees > 1).  A solo calendar block contributes only the
+    Slack-channel and RescueTime app-switch signals to CSC.
+    Semantics: CSC measures *external* scheduling fragmentation (back-to-back
+    short meetings with different people), not internal duration of focus.
+
+  API change: context_switch_cost() now accepts meeting_attendees (default 0)
+    to enable the is_social_meeting gate.  Existing callers without this kwarg
+    default to attendees=0, which is the safe conservative direction (no false
+    CSC inflation for unknown events).
+
+  Impact:
+    - Solo focus block (any duration): CSC = 0.0 (from Slack/RT signals only)
+    - Social meeting, long (≥30 min):  CSC ≈ 0.20 (unchanged)
+    - Social meeting, short (<30 min): CSC ≈ 0.45–0.55 (unchanged)
+    - CSC is now semantically consistent with CLS, FDI, and SDI across all
+      four meeting-sensitive metrics.
 """
 
 from typing import Optional
@@ -417,6 +449,7 @@ def context_switch_cost(
     is_short_meeting: bool = False,
     rt_app_switches: Optional[int] = None,
     rt_active_seconds: int = 0,
+    meeting_attendees: int = 0,
 ) -> float:
     """
     Context Switch Cost — fragmentation penalty for this window.
@@ -434,19 +467,37 @@ def context_switch_cost(
     With RT: weights shift to 0.40 meetings, 0.25 channels, 0.20 calendar
              fragmentation, 0.15 RT app switches.
     Without RT: original weights (0.50/0.30/0.20).
+
+    v1.6 — Solo-meeting fix:
+      meeting_switch and fragmentation now only fire for social meetings
+      (meeting_attendees > 1).  A solo calendar block (dedicated focus session,
+      baby-swimming class, personal event) is the opposite of context switching —
+      it is sustained, undivided engagement.  Treating solo blocks as context-
+      switch events inflated CSC for focus-protective scheduling.
+
+      Semantics: CSC measures external scheduling fragmentation (back-to-back
+      short meetings with different people), not internal focus duration.
+      meeting_attendees defaults to 0 so callers without the kwarg default to
+      the conservative direction (no false CSC inflation for unknown events).
     """
-    # Short meetings are more costly context switches
-    if in_meeting:
+    # v1.6: Only social meetings (with other participants) incur context-switch cost.
+    # A solo block is deliberate sustained focus — the opposite of fragmentation.
+    is_social_meeting = in_meeting and meeting_attendees > 1
+
+    # Short *social* meetings are the costliest context switches — they interrupt
+    # deep work without providing sufficient sustained engagement.
+    if is_social_meeting:
         meeting_switch = 0.5 + (0.5 if is_short_meeting else 0.0)
     else:
         meeting_switch = 0.0
 
-    # Cross-channel Slack activity
+    # Cross-channel Slack activity (applies regardless of meeting type)
     channel_switch = _norm(slack_channels_active, max_val=5)
 
-    # Calendar fragmentation: being in a very short meeting (<15 min)
-    fragmentation = 1.0 if (in_meeting and meeting_duration_minutes < 15) else (
-        0.5 if (in_meeting and meeting_duration_minutes < 30) else 0.0
+    # Calendar fragmentation: very short *social* meetings (<15 min)
+    # Solo blocks of any duration do not fragment the day; they protect it.
+    fragmentation = 1.0 if (is_social_meeting and meeting_duration_minutes < 15) else (
+        0.5 if (is_social_meeting and meeting_duration_minutes < 30) else 0.0
     )
 
     # v1.2: real app-switch signal from RescueTime
@@ -552,6 +603,10 @@ def compute_metrics(window_data: dict) -> dict:
     v1.2: rescuetime sub-dict is now extracted and forwarded to CLS, FDI,
     and CSC so that real behavioral signals (app_switches, productivity_score)
     are used when available, replacing the Slack-channel proxies.
+
+    v1.6: meeting_attendees is now forwarded to CSC so that the solo-meeting
+    fix (is_social_meeting gate) applies consistently across all four meeting-
+    sensitive metrics: CLS, FDI, SDI, and CSC.
     """
     cal = window_data.get("calendar", {})
     whoop = window_data.get("whoop", {})
@@ -608,6 +663,7 @@ def compute_metrics(window_data: dict) -> dict:
         is_short_meeting=(meeting_duration < 30) if in_meeting else False,
         rt_app_switches=rt_app_switches,
         rt_active_seconds=rt_active_seconds,
+        meeting_attendees=meeting_attendees,  # v1.6: solo-block awareness
     )
 
     ras = recovery_alignment_score(
