@@ -443,6 +443,30 @@ def compute_trend_context(today_date: str, lookback_days: int = 7) -> dict:
     }
 
 
+# ─── DPS helper ───────────────────────────────────────────────────────────────
+
+def _compute_dps_for_digest(windows: list[dict]) -> Optional[dict]:
+    """
+    Compute Daily Presence Score for the digest.
+
+    Returns a dict {"dps": float, "tier": str, "line": str} or None.
+    Wraps the DPS module with full exception isolation so the digest
+    never crashes due to a DPS computation error.
+    """
+    try:
+        from analysis.presence_score import compute_presence_score, format_presence_score_line
+        score = compute_presence_score(windows)
+        if not score.is_meaningful:
+            return None
+        return {
+            "dps": score.dps,
+            "tier": score.tier,
+            "line": format_presence_score_line(score),
+        }
+    except Exception:
+        return None
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -691,6 +715,9 @@ def compute_digest(windows: list[dict]) -> dict:
         "peak_focus_fdi": peak_focus_fdi,
         # v1.7: Cognitive Debt Index (None when < 3 days of history)
         "cognitive_debt": cognitive_debt,
+        # v1.8: Daily Presence Score — single 0–100 composite score
+        # (None when insufficient working-hour windows)
+        "presence_score": _compute_dps_for_digest(windows),
     }
 
 
@@ -882,11 +909,21 @@ def format_digest_message(digest: dict) -> str:
     peak_focus_hour = digest.get("peak_focus_hour")   # v1.6
     peak_focus_fdi = digest.get("peak_focus_fdi")     # v1.6
     cognitive_debt = digest.get("cognitive_debt")     # v1.7: CDI dict or None
+    presence_score = digest.get("presence_score")     # v1.8: DPS dict or None
 
     lines = [
         f"*Presence Report — {date_label}*",
         "",
     ]
+
+    # ── Daily Presence Score headline (v1.8) ──
+    # One composite number before all other metrics — the cognitive equivalent
+    # of WHOOP's daily strain score. "How was your cognitive day?" in one line.
+    if presence_score:
+        dps_line = presence_score.get("line", "")
+        if dps_line:
+            lines.append(dps_line)
+            lines.append("")
 
     # ── Health baseline ──
     if recovery is not None:

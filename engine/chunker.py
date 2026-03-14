@@ -397,4 +397,15 @@ def summarize_day(windows: list[dict]) -> dict:
     if rescuetime_summary is not None:
         summary["rescuetime"] = rescuetime_summary
 
+    # v1.6: compute Daily Presence Score (DPS) and inject into summary.
+    # DPS is a single 0–100 composite score analogous to WHOOP's day strain.
+    # It blends FDI, RAS, CLS, SDI, CSC into one "how was your cognitive day?" number.
+    # Stored as summary["presence_score"] = {"dps": float, "tier": str, "components": dict}.
+    # Gracefully omitted when insufficient data (< MIN_WORKING_WINDOWS).
+    try:
+        from analysis.presence_score import enrich_summary_with_dps
+        summary = enrich_summary_with_dps(summary, windows)
+    except Exception:
+        pass  # DPS is non-critical — never crash the ingestion pipeline
+
     return summary

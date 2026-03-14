@@ -398,7 +398,26 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         ))),
         "hourly_cls": _hourly_cls(windows),
         "baseline": _baseline(compare_days) if compare_days > 0 else None,
+        # Daily Presence Score (DPS) — single composite 0–100 score
+        "presence_score": _compute_dps(windows),
     }
+
+
+def _compute_dps(windows: list[dict]) -> Optional[dict]:
+    """Compute Daily Presence Score; returns None on failure."""
+    try:
+        from analysis.presence_score import compute_presence_score, format_presence_score_block
+        score = compute_presence_score(windows)
+        if not score.is_meaningful:
+            return None
+        return {
+            "dps": score.dps,
+            "tier": score.tier,
+            "components": score.components,
+            "block": format_presence_score_block(score),
+        }
+    except Exception:
+        return None
 
 
 # ─── Terminal rendering ───────────────────────────────────────────────────────
@@ -458,6 +477,13 @@ def print_compact(report: dict) -> None:
         print(f"  FDI  {_bar(f['active_fdi'], 10)} {_pct(f['active_fdi'])}  ({_label_fdi(f['active_fdi'])})")
     if m["ras"] is not None:
         print(f"  RAS  {_bar(m['ras'], 10)} {_pct(m['ras'])}  ({_label_ras(m['ras'])})")
+
+    # Daily Presence Score
+    dps_data = report.get("presence_score")
+    if dps_data:
+        from analysis.presence_score import _TIER_EMOJI
+        emoji = _TIER_EMOJI.get(dps_data["tier"], "⚪")
+        print(f"  DPS  {emoji} {dps_data['dps']:.0f}/100  ({dps_data['tier']})")
 
     # Heatmap
     hmap = _heatmap_line(report["hourly_cls"])
@@ -552,6 +578,15 @@ def print_full(report: dict, show_windows: bool = False) -> None:
         print(_c(f"\n  (Δ vs {baseline['days']}-day average)", DIM))
 
     print()
+
+    # ── Daily Presence Score ──────────────────────────────────────────────────
+    # Composite 0–100 score: the cognitive equivalent of WHOOP's day strain.
+    dps_data = report.get("presence_score")
+    if dps_data and dps_data.get("block"):
+        print(_c("  ② DPS — Daily Presence Score", BOLD))
+        for line in dps_data["block"].split("\n"):
+            print(f"  {line}")
+        print()
 
     # ── Hourly Heatmap ────────────────────────────────────────────────────────
     print(_c("  ③ Cognitive Load — Hourly", BOLD))
