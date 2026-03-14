@@ -86,7 +86,18 @@ def main():
         except Exception:
             pass
 
-        brief = compute_morning_brief(date_str, whoop_data, yesterday_summary, hrv_baseline)
+        # Today's calendar (v7.0)
+        today_calendar = None
+        try:
+            from collectors.gcal import collect as gcal_collect
+            today_calendar = gcal_collect(date_str)
+        except Exception as e:
+            print(f"Calendar failed: {e}", file=sys.stderr)
+
+        brief = compute_morning_brief(
+            date_str, whoop_data, yesterday_summary, hrv_baseline,
+            today_calendar=today_calendar,
+        )
         message = format_morning_brief_message(brief)
         print("=" * 60)
         print(message)

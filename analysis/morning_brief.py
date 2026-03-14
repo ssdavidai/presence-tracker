@@ -7,6 +7,7 @@ Sends David a morning Slack DM at 07:00 Budapest time with:
 - Yesterday's cognitive load as context
 - A scheduling suggestion based on physiological state
 - Multi-day trend context (HRV streaks, overcapacity streaks, recovery momentum)
+- Today's calendar preview with schedule-aware recommendations (v7.0)
 
 This is the forward-looking complement to the end-of-day digest.
 The digest tells you how the day went; the morning brief tells you
@@ -15,13 +16,15 @@ what kind of day to plan.
 Architecture:
     1. Collect WHOOP data for today (WHOOP posts last night's data by ~6am)
     2. Load yesterday's daily summary from the store (if available)
-    3. Compute readiness tier and recommendation
-    4. Compute multi-day trend context from rolling summary
-    5. Send DM to David
+    3. Collect today's Google Calendar events (v7.0)
+    4. Compute readiness tier and calendar-aware recommendation
+    5. Compute multi-day trend context from rolling summary
+    6. Send DM to David
 
 Design principle: actionable specificity.
 Generic "rest today" advice is useless. The brief gives David one
-concrete scheduling action based on the actual numbers.
+concrete scheduling action based on the actual numbers — now combined
+with what's actually on the calendar today.
 
 v1.5 — Multi-day trend context in morning brief:
     The morning brief now incorporates the same trend-detection engine
@@ -36,6 +39,32 @@ v1.5 — Multi-day trend context in morning brief:
     at 23:45 — too late to change the day — but the morning brief would
     show nothing.  Now David gets the same pattern intelligence at 07:00,
     when it can actually influence scheduling decisions.
+
+v7.0 — Calendar-aware scheduling advice:
+    The morning brief now fetches today's Google Calendar events and
+    incorporates them into:
+
+    1. Schedule-specific recommendations: instead of "front-load creative work
+       this morning" (generic), the brief now says "You have 3h of meetings
+       from 10am onwards — use the 8–9:45 window for deep work" (specific).
+
+    2. Today's Schedule section: a compact list of today's meetings with
+       times, attendee counts, and meeting-load summary so David can see the
+       shape of his day at a glance.
+
+    3. Calendar-load classification:
+       - Free day (0 meetings) → full deep-work mode
+       - Light day (< 90 min) → flex schedule with one anchor block
+       - Moderate (90–240 min) → significant meetings, protect free blocks
+       - Heavy (> 240 min) → meeting-dominant day, manage energy carefully
+
+    The calendar data flows into _calendar_aware_recommendation(), which
+    replaces _tier_recommendation() in the send path.  The original
+    _tier_recommendation() is preserved for backward compatibility.
+
+    When today's calendar cannot be fetched (network error, API timeout),
+    the system falls back gracefully to the existing tier-based
+    recommendation — no message is lost.
 """
 
 import json
@@ -177,6 +206,291 @@ def _tier_recommendation(
         return "WHOOP data unavailable — check your device charge and sync."
 
 
+# ─── Calendar analysis (v7.0) ─────────────────────────────────────────────────
+
+def analyse_today_calendar(calendar_data: dict) -> dict:
+    """
+    Summarise today's calendar into scheduling-relevant signals.
+
+    Takes the raw output from collectors.gcal.collect() and produces a
+    compact dict describing the shape of the day: total meeting load,
+    first meeting time, largest meeting, free blocks in working hours,
+    and a load classification.
+
+    Parameters
+    ----------
+    calendar_data : dict
+        Raw output from collectors.gcal.collect(date_str).
+        Expected keys: 'events', 'total_meeting_minutes', 'event_count'.
+
+    Returns
+    -------
+    dict with fields:
+        event_count          : int   — number of meetings today
+        total_minutes        : int   — total scheduled meeting time (minutes)
+        load_class           : str   — 'free' | 'light' | 'moderate' | 'heavy'
+        first_meeting_hour   : int | None   — hour of first meeting (0–23)
+        first_meeting_label  : str | None   — e.g. "10:00"
+        largest_meeting_mins : int          — duration of longest meeting
+        largest_meeting_title: str          — title of longest meeting
+        largest_attendees    : int          — attendee count of largest meeting
+        social_meetings      : int          — meetings with > 1 attendee
+        free_morning         : bool         — True if no meeting before 10am
+        free_afternoon       : bool         — True if no meeting after 13:00
+        events_summary       : list[dict]   — [{time, title, duration_min, attendees}]
+        pre_first_free_mins  : int          — minutes of free time before first meeting
+
+    Load classification:
+        free      : 0 meetings
+        light     : > 0 meetings, ≤ 90 total minutes
+        moderate  : 91–240 total minutes
+        heavy     : > 240 total minutes
+    """
+    events = calendar_data.get("events", []) or []
+    total_minutes = calendar_data.get("total_meeting_minutes", 0) or 0
+
+    # Filter to working-hours events (7am–10pm) and non-all-day
+    working_events = []
+    for e in events:
+        start_str = e.get("start")
+        if not start_str:
+            continue
+        if e.get("is_all_day"):
+            continue
+        try:
+            start_dt = datetime.fromisoformat(start_str)
+            hour = start_dt.hour
+            if 7 <= hour < 22:
+                working_events.append((start_dt, e))
+        except (ValueError, TypeError):
+            continue
+
+    # Sort chronologically
+    working_events.sort(key=lambda x: x[0])
+    event_dicts = [e for _, e in working_events]
+
+    # Recompute total minutes from working events only
+    working_minutes = sum(e.get("duration_minutes", 0) for e in event_dicts)
+
+    # Load class
+    if not event_dicts:
+        load_class = "free"
+    elif working_minutes <= 90:
+        load_class = "light"
+    elif working_minutes <= 240:
+        load_class = "moderate"
+    else:
+        load_class = "heavy"
+
+    # First meeting
+    first_meeting_hour: Optional[int] = None
+    first_meeting_label: Optional[str] = None
+    pre_first_free_mins: int = 0
+    if working_events:
+        first_dt, _ = working_events[0]
+        first_meeting_hour = first_dt.hour
+        first_meeting_label = first_dt.strftime("%-H:%M")
+        # Minutes between 8am (brief fires at 7am; 8am is realistic start) and first meeting
+        workday_start_h = 8
+        if first_meeting_hour > workday_start_h:
+            pre_first_free_mins = (first_meeting_hour - workday_start_h) * 60 + first_dt.minute
+        elif first_meeting_hour == workday_start_h:
+            pre_first_free_mins = first_dt.minute
+
+    # Largest meeting
+    largest_meeting_mins = 0
+    largest_meeting_title = ""
+    largest_attendees = 0
+    if event_dicts:
+        biggest = max(event_dicts, key=lambda e: e.get("duration_minutes", 0))
+        largest_meeting_mins = biggest.get("duration_minutes", 0)
+        largest_meeting_title = biggest.get("title", "")
+        largest_attendees = biggest.get("attendee_count", 0)
+
+    # Social meetings (those with other attendees)
+    social_meetings = sum(1 for e in event_dicts if e.get("attendee_count", 0) > 1)
+
+    # Free morning (no meeting before 10am)
+    free_morning = not any(
+        dt.hour < 10 for dt, _ in working_events
+    )
+
+    # Free afternoon (no meeting at 13:00 or later)
+    free_afternoon = not any(
+        dt.hour >= 13 for dt, _ in working_events
+    )
+
+    # Events summary for display
+    events_summary = []
+    for dt, e in working_events:
+        events_summary.append({
+            "time": dt.strftime("%-H:%M"),
+            "title": e.get("title", ""),
+            "duration_min": e.get("duration_minutes", 0),
+            "attendees": e.get("attendee_count", 0),
+        })
+
+    return {
+        "event_count": len(event_dicts),
+        "total_minutes": working_minutes,
+        "load_class": load_class,
+        "first_meeting_hour": first_meeting_hour,
+        "first_meeting_label": first_meeting_label,
+        "largest_meeting_mins": largest_meeting_mins,
+        "largest_meeting_title": largest_meeting_title,
+        "largest_attendees": largest_attendees,
+        "social_meetings": social_meetings,
+        "free_morning": free_morning,
+        "free_afternoon": free_afternoon,
+        "events_summary": events_summary,
+        "pre_first_free_mins": pre_first_free_mins,
+    }
+
+
+def _calendar_aware_recommendation(
+    tier: str,
+    recovery: Optional[float],
+    hrv: Optional[float],
+    yesterday_cls: Optional[float],
+    yesterday_meeting_mins: Optional[int],
+    cal: Optional[dict],
+) -> str:
+    """
+    Generate a calendar-aware scheduling recommendation.
+
+    When today's calendar data is available (cal is not None), the advice is
+    specific to the actual meeting schedule — pointing at real free windows
+    rather than generic guidance.  When cal is None, falls back to the
+    original tier-based advice from _tier_recommendation().
+
+    Parameters
+    ----------
+    tier : readiness tier ('peak', 'good', 'moderate', 'low', 'recovery')
+    recovery : WHOOP recovery score (0–100), or None
+    hrv : HRV RMSSD in ms, or None
+    yesterday_cls : avg CLS yesterday (0–1), or None
+    yesterday_meeting_mins : meeting minutes yesterday, or None
+    cal : output from analyse_today_calendar(), or None
+
+    Returns
+    -------
+    str — one to three sentence recommendation, specific to today.
+    """
+    # No calendar data → fall back to original logic
+    if cal is None:
+        return _tier_recommendation(tier, recovery, hrv, yesterday_cls, yesterday_meeting_mins)
+
+    load_class = cal.get("load_class", "free")
+    total_mins = cal.get("total_minutes", 0)
+    first_label = cal.get("first_meeting_label")
+    pre_free = cal.get("pre_first_free_mins", 0)
+    free_morning = cal.get("free_morning", True)
+    free_afternoon = cal.get("free_afternoon", True)
+    event_count = cal.get("event_count", 0)
+    largest_mins = cal.get("largest_meeting_mins", 0)
+    social = cal.get("social_meetings", 0)
+
+    # ── Recovery/Low tier: calendar doesn't change the core advice ────────
+    if tier == "recovery":
+        rec_note = f"Recovery at {recovery:.0f}%" if recovery else "Very low recovery"
+        cal_note = ""
+        if event_count > 0:
+            cal_note = f" You have {event_count} meeting{'s' if event_count > 1 else ''} today ({total_mins}min) — consider rescheduling anything non-essential."
+        return (
+            f"{rec_note} — this is a genuine recovery day.{cal_note} "
+            "Short walks, admin tasks, and protecting sleep tonight are the priority."
+        )
+
+    if tier == "low":
+        hrv_note = (
+            f" (HRV at {hrv:.0f}ms signals autonomic pressure)" if hrv else ""
+        )
+        cal_note = ""
+        if load_class == "heavy":
+            cal_note = f" With {total_mins//60}h{total_mins%60:02d}min of meetings ahead, pace yourself carefully — take breaks between blocks."
+        elif load_class == "moderate":
+            cal_note = f" {total_mins}min of meetings today — protect any free blocks for recovery."
+        return (
+            f"Low readiness{hrv_note}. Keep today light: routine tasks, async comms, no major decisions.{cal_note} "
+            "Prioritise sleep hygiene tonight."
+        )
+
+    # ── Peak / Good / Moderate tier: give calendar-specific guidance ───────
+
+    if load_class == "free":
+        # No meetings — pure deep work day
+        if tier in ("peak", "good"):
+            return (
+                "Calendar is clear today — ideal conditions for deep, uninterrupted work. "
+                "Block a 2–3h focused session on your most complex current problem."
+            )
+        else:  # moderate
+            return (
+                "Calendar is clear today — use the freedom to pace yourself. "
+                "One solid deep-work block in the morning, lighter work after lunch."
+            )
+
+    elif load_class == "light":
+        # Short meetings, plenty of free time
+        if first_label and pre_free >= 60:
+            window_note = f"First meeting at {first_label} — use the {pre_free//60}h{pre_free%60:02d}min before it for focused work."
+        else:
+            window_note = f"{total_mins}min of meetings — plenty of free time for deep work."
+        if tier == "peak":
+            return f"High readiness + light meeting load. {window_note} Front-load your hardest problem."
+        elif tier == "good":
+            return f"Good readiness with a light schedule. {window_note}"
+        else:
+            return f"Manageable day. {window_note} One focused block is realistic."
+
+    elif load_class == "moderate":
+        # 90–240 min meetings — needs strategy
+        if free_morning and first_label:
+            return (
+                f"Meetings start at {first_label} ({total_mins}min total). "
+                f"Protect the {'morning' if free_morning else 'afternoon'} window for deep work — "
+                f"{pre_free//60}h{pre_free%60:02d}min before first meeting is your focus runway."
+                if pre_free >= 45 else
+                f"Meetings from {first_label} ({total_mins}min total). "
+                "Use gaps between meetings for shallow work; protect any 45min+ free blocks for focused tasks."
+            )
+        elif free_afternoon:
+            return (
+                f"Morning meetings ({total_mins}min). "
+                "Afternoon is free — use it for the deep work that meetings will displace. "
+                "Batch any quick decisions into the last meeting of the morning."
+            )
+        else:
+            return (
+                f"Moderate meeting load ({total_mins}min across {event_count} meetings). "
+                "Identify the longest free gap and protect it for focused work. "
+                "Set status to DND during that block."
+            )
+
+    else:  # heavy (> 240 min)
+        hours = total_mins // 60
+        mins_rem = total_mins % 60
+        time_str = f"{hours}h{mins_rem:02d}min" if mins_rem else f"{hours}h"
+        if tier == "peak":
+            return (
+                f"High readiness but heavy meeting load ({time_str}). "
+                f"{'Use 8–' + first_label + ' for any focused work before the day gets consumed.' if first_label and pre_free >= 30 else 'Meetings dominate today — prioritise decision quality over volume.'} "
+                "Energy manage: stay hydrated, take 5min breaks between calls."
+            )
+        elif tier == "good":
+            return (
+                f"Solid readiness heading into a {time_str} meeting day. "
+                f"{'Pre-work any critical items before ' + first_label + '.' if first_label and pre_free >= 30 else 'Front-load any solo prep before the first meeting.'} "
+                "Batch decisions into the meetings rather than deferring for async."
+            )
+        else:  # moderate readiness + heavy calendar = warning
+            return (
+                f"⚠️ Moderate readiness + heavy meeting load ({time_str}). "
+                "This is a risk combination — protect breaks between meetings and "
+                "defer any non-essential deep work to tomorrow when load is lighter."
+            )
+
+
 # ─── Score bar helper (shared style with daily digest) ───────────────────────
 
 def _score_bar(value: float, width: int = 10) -> str:
@@ -209,6 +523,7 @@ def compute_morning_brief(
     hrv_baseline: Optional[float] = None,
     trend_context: Optional[dict] = None,
     personal_baseline=None,
+    today_calendar: Optional[dict] = None,
 ) -> dict:
     """
     Compute the morning brief data structure.
@@ -229,6 +544,10 @@ def compute_morning_brief(
         are anchored to David's own percentile distribution rather than
         population-norm WHOOP thresholds.  Falls back gracefully to population
         norms when None or when insufficient data exists.
+    today_calendar : raw output from collectors.gcal.collect(today_date) (optional, v7.0).
+        When supplied, used to generate calendar-aware scheduling recommendations
+        and a "Today's Schedule" section in the brief.  When None, falls back
+        to tier-only recommendations (backward compatible).
 
     Returns
     -------
@@ -250,8 +569,17 @@ def compute_morning_brief(
         yesterday_meeting_mins = yesterday_summary.get("calendar", {}).get("total_meeting_minutes")
 
     tier = _readiness_tier(recovery, hrv, baseline=personal_baseline)
-    recommendation = _tier_recommendation(
-        tier, recovery, hrv, yesterday_cls, yesterday_meeting_mins
+
+    # v7.0: calendar-aware recommendation
+    cal_analysis: Optional[dict] = None
+    if today_calendar is not None:
+        try:
+            cal_analysis = analyse_today_calendar(today_calendar)
+        except Exception:
+            cal_analysis = None
+
+    recommendation = _calendar_aware_recommendation(
+        tier, recovery, hrv, yesterday_cls, yesterday_meeting_mins, cal_analysis
     )
 
     return {
@@ -282,6 +610,8 @@ def compute_morning_brief(
             "recovery_p80": getattr(personal_baseline, "recovery_p80", None),
             "hrv_p20": getattr(personal_baseline, "hrv_p20", None),
         } if personal_baseline is not None else None,
+        # v7.0: today's calendar analysis (for display)
+        "today_calendar": cal_analysis,
     }
 
 
@@ -414,6 +744,47 @@ def format_morning_brief_message(brief: dict) -> str:
             lines.append("*Pattern:*")
             for tl in trend_lines:
                 lines.append(f"  {tl}")
+
+    # ── Today's Schedule (v7.0) ───────────────────────────────────────────
+    # Show what's on the calendar today so David can see the shape of his day.
+    cal = brief.get("today_calendar")
+    if cal:
+        events_summary = cal.get("events_summary", [])
+        total_mins = cal.get("total_minutes", 0)
+        load_class = cal.get("load_class", "free")
+
+        if load_class == "free":
+            lines.append("")
+            lines.append("*📅 Today:* No meetings scheduled — full focus day")
+        else:
+            load_emoji = {
+                "light": "🟢",
+                "moderate": "🟡",
+                "heavy": "🔴",
+            }.get(load_class, "⚪")
+            hours = total_mins // 60
+            mins_rem = total_mins % 60
+            if hours > 0:
+                time_str = f"{hours}h{mins_rem:02d}min" if mins_rem else f"{hours}h"
+            else:
+                time_str = f"{mins_rem}min"
+
+            lines.append("")
+            lines.append(f"*📅 Today ({load_emoji} {time_str} meetings):*")
+            for ev in events_summary[:5]:  # cap at 5 to keep the message scannable
+                t = ev.get("time", "")
+                title = ev.get("title", "") or "Meeting"
+                dur = ev.get("duration_min", 0)
+                att = ev.get("attendees", 0)
+                att_str = f"  {att}p" if att > 1 else ""
+                dur_str = f"{dur}min" if dur else ""
+                # Truncate long titles
+                if len(title) > 32:
+                    title = title[:30] + "…"
+                lines.append(f"  {t}  {title}  _{dur_str}{att_str}_")
+            if len(events_summary) > 5:
+                remaining = len(events_summary) - 5
+                lines.append(f"  _(+{remaining} more)_")
 
     return "\n".join(lines)
 
@@ -549,6 +920,19 @@ def send_morning_brief(date_str: Optional[str] = None) -> bool:
     except Exception as e:
         print(f"[morning] Could not compute personal baseline: {e}", file=sys.stderr)
 
+    # ── Collect today's calendar (v7.0) ──────────────────────────────────
+    # Fetches today's meetings so the recommendation can reference actual
+    # schedule events rather than giving generic advice.
+    today_calendar = None
+    try:
+        from collectors.gcal import collect as gcal_collect
+        today_calendar = gcal_collect(date_str)
+        event_count = today_calendar.get("event_count", 0)
+        total_mins = today_calendar.get("total_meeting_minutes", 0)
+        print(f"[morning] Today's calendar: {event_count} events, {total_mins}min scheduled")
+    except Exception as e:
+        print(f"[morning] Could not collect today's calendar: {e}", file=sys.stderr)
+
     # ── Compute and send ──────────────────────────────────────────────────
     brief = compute_morning_brief(
         today_date=date_str,
@@ -557,6 +941,7 @@ def send_morning_brief(date_str: Optional[str] = None) -> bool:
         hrv_baseline=hrv_baseline,
         trend_context=trend_context,
         personal_baseline=personal_baseline,
+        today_calendar=today_calendar,
     )
     message = format_morning_brief_message(brief)
 
@@ -618,7 +1003,18 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    brief = compute_morning_brief(date_str, whoop_data, yesterday_summary, hrv_baseline, trend_context)
+    # Today's calendar (v7.0)
+    today_calendar = None
+    try:
+        from collectors.gcal import collect as gcal_collect
+        today_calendar = gcal_collect(date_str)
+    except Exception:
+        pass
+
+    brief = compute_morning_brief(
+        date_str, whoop_data, yesterday_summary, hrv_baseline, trend_context,
+        today_calendar=today_calendar,
+    )
     message = format_morning_brief_message(brief)
 
     print("=" * 60)
