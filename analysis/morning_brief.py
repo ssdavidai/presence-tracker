@@ -8,6 +8,8 @@ Sends David a morning Slack DM at 07:00 Budapest time with:
 - A scheduling suggestion based on physiological state
 - Multi-day trend context (HRV streaks, overcapacity streaks, recovery momentum)
 - Today's calendar preview with schedule-aware recommendations (v7.0)
+- Cognitive Debt Index — accumulated fatigue signal (v8.0)
+- DPS trend — cognitive day quality trajectory over last 7 days (v9.0)
 
 This is the forward-looking complement to the end-of-day digest.
 The digest tells you how the day went; the morning brief tells you
@@ -616,6 +618,12 @@ def compute_morning_brief(
         # Computed here so the morning brief can warn David before the day starts.
         # Returns None when < 3 days of history exist (graceful degradation).
         "cognitive_debt": _compute_cdi_for_brief(today_date),
+        # v9.0: Daily Presence Score trend — is cognitive day quality improving or declining?
+        # CDI tracks load vs. recovery balance; DPS trend tracks *quality* of days.
+        # A declining DPS trend (e.g. 78 → 65 → 52) means David's days are getting
+        # worse even if CDI isn't yet signalling alarm — early warning before fatigue peaks.
+        # Returns None when < 3 days of history exist (graceful degradation).
+        "dps_trend": _compute_dps_trend_for_brief(today_date),
     }
 
 
@@ -639,6 +647,93 @@ def _compute_cdi_for_brief(date_str: str) -> Optional[dict]:
         }
     except Exception:
         return None
+
+
+def _compute_dps_trend_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute DPS trend for the morning brief.  Returns None when insufficient data.
+
+    The DPS trend answers: "Is the quality of David's cognitive days improving
+    or declining over the past 7 days?"
+
+    This is distinct from CDI:
+    - CDI: load vs. recovery balance (fatigue accumulation signal)
+    - DPS trend: composite day-quality trajectory (early warning before CDI peaks)
+
+    A declining DPS trend with a healthy CDI still tells David that his days are
+    becoming less focused/aligned even if he hasn't crossed fatigue thresholds yet.
+
+    Wraps compute_dps_trend() with full exception isolation.
+
+    Returns:
+        dict with keys:
+            mean_dps       — 7-day average DPS (0–100)
+            delta_dps      — recent 3d avg minus prior 4d avg
+            trend_direction— 'improving' | 'declining' | 'stable'
+            days_used      — days with meaningful DPS data
+            recent_scores  — last 3 DPS values for sparkline display
+            line           — formatted one-line summary for Slack
+        or None if < 3 meaningful days exist.
+    """
+    try:
+        from analysis.presence_score import compute_dps_trend, get_historical_dps
+
+        trend = compute_dps_trend(date_str, days=7)
+        if trend is None:
+            return None
+
+        # Gather last 3 DPS scores for the sparkline
+        history = get_historical_dps(date_str, days=7)
+        meaningful = [h for h in history if h["is_meaningful"]]
+        recent_scores = [round(h["dps"]) for h in meaningful[-3:]]
+
+        line = _format_dps_trend_line(trend, recent_scores)
+        if not line:
+            return None
+
+        return {
+            "mean_dps": trend["mean_dps"],
+            "delta_dps": trend["delta_dps"],
+            "trend_direction": trend["trend_direction"],
+            "days_used": trend["days_used"],
+            "recent_scores": recent_scores,
+            "line": line,
+        }
+    except Exception:
+        return None
+
+
+def _format_dps_trend_line(trend: dict, recent_scores: list) -> str:
+    """
+    Format a compact DPS trend line for the morning brief.
+
+    Examples:
+        "📈 Day quality improving: 58 → 65 → 71 (+13 pts)"
+        "📉 Day quality declining: 78 → 65 → 52 (−26 pts)"
+        "➡️ Day quality stable: 68 → 72 → 70 (7-day avg 70)"
+
+    Only shows when trend is meaningful (direction != stable OR delta is notable).
+    Returns empty string for stable + no notable delta (caller skips it).
+    """
+    direction = trend.get("trend_direction", "stable")
+    delta = trend.get("delta_dps", 0.0)
+    mean_dps = trend.get("mean_dps", 0.0)
+    days_used = trend.get("days_used", 0)
+
+    # Build sparkline from recent scores
+    sparkline = " → ".join(str(s) for s in recent_scores) if recent_scores else ""
+
+    if direction == "improving":
+        delta_str = f"+{delta:.0f} pts" if delta >= 0 else f"{delta:.0f} pts"
+        return f"📈 Day quality improving: {sparkline} ({delta_str})"
+    elif direction == "declining":
+        delta_str = f"−{abs(delta):.0f} pts"
+        return f"📉 Day quality declining: {sparkline} ({delta_str})"
+    else:
+        # Stable — only show when we have enough context (≥ 5 days)
+        if days_used >= 5:
+            return f"➡️ Day quality stable ({days_used}d avg: {mean_dps:.0f}/100)"
+        return ""
 
 
 # ─── Message formatter ────────────────────────────────────────────────────────
@@ -781,6 +876,19 @@ def format_morning_brief_message(brief: dict) -> str:
         if cdi_line:
             lines.append("")
             lines.append(f"_{cdi_line}_")
+
+    # ── DPS Trend (v9.0) ──────────────────────────────────────────────────
+    # Is the quality of David's cognitive days improving or declining?
+    # Shown after CDI so the two multi-day signals appear together.
+    # CDI = fatigue accumulation (load vs. recovery balance).
+    # DPS trend = cognitive day quality trajectory (focus, alignment, sustainability).
+    # Together they answer: "Am I carrying debt AND getting worse days?"
+    dps_trend = brief.get("dps_trend")
+    if dps_trend:
+        dps_trend_line = dps_trend.get("line", "")
+        if dps_trend_line:
+            lines.append("")
+            lines.append(f"_{dps_trend_line}_")
 
     # ── Today's Schedule (v7.0) ───────────────────────────────────────────
     # Show what's on the calendar today so David can see the shape of his day.

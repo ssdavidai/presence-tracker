@@ -534,3 +534,192 @@ class TestEdgeCases:
             WEIGHT_ACTIVE_ENGAGEMENT
         )
         assert abs(total - 1.0) < 1e-9, f"Weights sum to {total}, not 1.0"
+
+
+# ─── Historical DPS ───────────────────────────────────────────────────────────
+
+class TestGetHistoricalDps:
+    """Tests for get_historical_dps() — loading per-day DPS from the store."""
+
+    def test_empty_when_no_available_dates(self, monkeypatch):
+        """No available data → empty list, no crash."""
+        import analysis.presence_score as ps_mod
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: [])
+        result = ps_mod.get_historical_dps("2026-03-14", days=7)
+        assert result == []
+
+    def test_returns_list(self, monkeypatch):
+        """Return type is always a list."""
+        import analysis.presence_score as ps_mod
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: [])
+        result = ps_mod.get_historical_dps("2026-03-14", days=7)
+        assert isinstance(result, list)
+
+    def test_result_structure_when_patched(self, monkeypatch):
+        """Each history entry must have date, dps, tier, is_meaningful."""
+        import analysis.presence_score as ps_mod
+        fake = [
+            {"date": "2026-03-12", "dps": 72.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-13", "dps": 65.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 58.0, "tier": "moderate", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake)
+        result = ps_mod.get_historical_dps("2026-03-14", days=7)
+        for entry in result:
+            assert "date" in entry
+            assert "dps" in entry
+            assert "tier" in entry
+            assert "is_meaningful" in entry
+
+    def test_dps_values_in_range(self, monkeypatch):
+        """All DPS values in history should be within [0, 100]."""
+        import analysis.presence_score as ps_mod
+        fake = [
+            {"date": "2026-03-13", "dps": 55.0, "tier": "moderate", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 88.0, "tier": "strong", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake)
+        result = ps_mod.get_historical_dps("2026-03-14", days=7)
+        for entry in result:
+            assert 0.0 <= entry["dps"] <= 100.0
+
+    def test_invalid_date_returns_empty(self):
+        """Invalid date string should not crash — returns empty list."""
+        result = get_historical_dps("not-a-date", days=7)
+        assert result == []
+
+    def test_days_zero_returns_empty(self, monkeypatch):
+        """days=0 should return an empty list."""
+        import analysis.presence_score as ps_mod
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: [])
+        result = ps_mod.get_historical_dps("2026-03-14", days=0)
+        assert result == []
+
+    def test_oldest_first_ordering(self, monkeypatch):
+        """Results must be sorted oldest-first."""
+        import analysis.presence_score as ps_mod
+        fake = [
+            {"date": "2026-03-10", "dps": 60.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-12", "dps": 70.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 80.0, "tier": "strong", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake)
+        result = ps_mod.get_historical_dps("2026-03-14", days=7)
+        dates = [r["date"] for r in result]
+        assert dates == sorted(dates), "Results should be sorted oldest-first"
+
+
+# ─── DPS Trend ────────────────────────────────────────────────────────────────
+
+class TestComputeDpsTrend:
+    """Tests for compute_dps_trend() — direction and delta of DPS over time."""
+
+    def _patch_history(self, monkeypatch, scores: list[float], base_date="2026-03-14"):
+        """Patch get_historical_dps to return a fake history with given DPS values."""
+        import analysis.presence_score as ps_mod
+        dates = ["2026-03-{:02d}".format(8 + i) for i in range(len(scores))]
+        fake = [
+            {"date": d, "dps": s, "tier": "good", "is_meaningful": True}
+            for d, s in zip(dates, scores)
+        ]
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake)
+
+    def test_returns_none_when_fewer_than_3_days(self, monkeypatch):
+        """Fewer than 3 meaningful days → None."""
+        import analysis.presence_score as ps_mod
+        fake = [
+            {"date": "2026-03-13", "dps": 70.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 65.0, "tier": "good", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake)
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is None
+
+    def test_returns_dict_with_required_keys(self, monkeypatch):
+        """compute_dps_trend returns a dict with the expected keys."""
+        self._patch_history(monkeypatch, [60.0, 65.0, 72.0, 78.0, 80.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        for key in ("mean_dps", "delta_dps", "trend_direction", "days_used", "best_day", "worst_day"):
+            assert key in result, f"Missing key: {key}"
+
+    def test_improving_direction_when_recent_higher(self, monkeypatch):
+        """Recent DPS clearly above prior → improving."""
+        # prior: 50, 52, 54 | recent: 70, 72, 75
+        self._patch_history(monkeypatch, [50.0, 52.0, 54.0, 70.0, 72.0, 75.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        assert result["trend_direction"] == "improving"
+
+    def test_declining_direction_when_recent_lower(self, monkeypatch):
+        """Recent DPS clearly below prior → declining."""
+        # prior: 80, 78, 75 | recent: 55, 52, 50
+        self._patch_history(monkeypatch, [80.0, 78.0, 75.0, 55.0, 52.0, 50.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        assert result["trend_direction"] == "declining"
+
+    def test_stable_when_delta_within_threshold(self, monkeypatch):
+        """Small delta (< 3.0 pts) → stable."""
+        self._patch_history(monkeypatch, [70.0, 71.0, 70.0, 72.0, 71.0, 70.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        assert result["trend_direction"] == "stable"
+
+    def test_mean_dps_is_accurate(self, monkeypatch):
+        """mean_dps should be the average of all meaningful DPS values."""
+        scores = [60.0, 70.0, 80.0]
+        self._patch_history(monkeypatch, scores)
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        expected_mean = round(sum(scores) / len(scores), 1)
+        assert abs(result["mean_dps"] - expected_mean) < 0.5
+
+    def test_delta_dps_sign_for_improving(self, monkeypatch):
+        """Improving trend should have positive delta_dps."""
+        self._patch_history(monkeypatch, [50.0, 52.0, 54.0, 70.0, 72.0, 74.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        assert result["delta_dps"] > 0
+
+    def test_delta_dps_sign_for_declining(self, monkeypatch):
+        """Declining trend should have negative delta_dps."""
+        self._patch_history(monkeypatch, [80.0, 78.0, 76.0, 55.0, 53.0, 51.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        assert result["delta_dps"] < 0
+
+    def test_best_and_worst_day_are_valid_dates(self, monkeypatch):
+        """best_day and worst_day should be date strings in the history."""
+        self._patch_history(monkeypatch, [60.0, 80.0, 70.0, 75.0, 55.0])
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        # Should be date strings, not None
+        assert result["best_day"] is not None
+        assert result["worst_day"] is not None
+
+    def test_days_used_matches_meaningful_entries(self, monkeypatch):
+        """days_used should count only meaningful DPS entries."""
+        import analysis.presence_score as ps_mod
+        fake = [
+            {"date": "2026-03-10", "dps": 60.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-11", "dps": 0.0, "tier": "poor", "is_meaningful": False},
+            {"date": "2026-03-12", "dps": 65.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-13", "dps": 70.0, "tier": "good", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake)
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is not None
+        # 3 meaningful entries used
+        assert result["days_used"] == 3
+
+    def test_returns_none_on_exception(self, monkeypatch):
+        """Any internal exception → graceful None return."""
+        import analysis.presence_score as ps_mod
+
+        def _raise(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(ps_mod, "get_historical_dps", _raise)
+        result = compute_dps_trend("2026-03-14", days=7)
+        assert result is None

@@ -484,8 +484,16 @@ def compute_dps_trend(end_date_str: str, days: int = 7) -> Optional[dict]:
     - best_day: date with highest DPS
     - worst_day: date with lowest DPS
 
-    Returns None when insufficient data (< 3 days).
+    Returns None when insufficient data (< 3 days) or on any error.
     """
+    try:
+        return _compute_dps_trend_inner(end_date_str, days)
+    except Exception:
+        return None
+
+
+def _compute_dps_trend_inner(end_date_str: str, days: int) -> Optional[dict]:
+    """Internal implementation of compute_dps_trend (exception-unsafe)."""
     history = get_historical_dps(end_date_str, days=days)
     if len(history) < 3:
         return None

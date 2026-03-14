@@ -644,3 +644,353 @@ class TestFormatMorningBriefTrendSection:
         msg = format_morning_brief_message(brief)
         assert isinstance(msg, str)
         assert "Pattern:" not in msg
+
+
+# ─── DPS Trend in morning brief ───────────────────────────────────────────────
+
+class TestComputeMorningBriefDpsTrend:
+    """Tests for the DPS trend field injected into compute_morning_brief()."""
+
+    def test_dps_trend_key_always_present(self):
+        """compute_morning_brief() must always include 'dps_trend' key."""
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        assert "dps_trend" in brief
+
+    def test_dps_trend_is_none_or_dict(self):
+        """dps_trend must be None (insufficient data) or a dict."""
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        value = brief.get("dps_trend")
+        assert value is None or isinstance(value, dict)
+
+    def test_dps_trend_dict_has_required_keys(self, monkeypatch):
+        """When DPS trend data is available, the dict has all expected keys."""
+        import analysis.morning_brief as mb_mod
+        fake_trend = {
+            "mean_dps": 68.0,
+            "delta_dps": -12.0,
+            "trend_direction": "declining",
+            "days_used": 5,
+            "recent_scores": [72, 65, 58],
+            "line": "📉 Day quality declining: 72 → 65 → 58 (−14 pts)",
+        }
+        monkeypatch.setattr(mb_mod, "_compute_dps_trend_for_brief", lambda *a: fake_trend)
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        dps_trend = brief.get("dps_trend")
+        assert dps_trend is not None
+        for key in ("mean_dps", "delta_dps", "trend_direction", "days_used", "recent_scores", "line"):
+            assert key in dps_trend, f"Missing key in dps_trend: {key}"
+
+    def test_dps_trend_none_when_helper_returns_none(self, monkeypatch):
+        """When _compute_dps_trend_for_brief returns None, brief['dps_trend'] is None."""
+        import analysis.morning_brief as mb_mod
+        monkeypatch.setattr(mb_mod, "_compute_dps_trend_for_brief", lambda *a: None)
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        assert brief.get("dps_trend") is None
+
+    def test_dps_trend_present_when_helper_returns_data(self, monkeypatch):
+        """When _compute_dps_trend_for_brief returns data, brief['dps_trend'] is that data."""
+        import analysis.morning_brief as mb_mod
+        fake = {"mean_dps": 72.0, "delta_dps": 8.0, "trend_direction": "improving",
+                "days_used": 5, "recent_scores": [62, 68, 74],
+                "line": "📈 Day quality improving: 62 → 68 → 74 (+12 pts)"}
+        monkeypatch.setattr(mb_mod, "_compute_dps_trend_for_brief", lambda *a: fake)
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        assert brief.get("dps_trend") == fake
+
+    def test_existing_brief_keys_unaffected(self, monkeypatch):
+        """Adding dps_trend must not remove or corrupt other brief fields."""
+        import analysis.morning_brief as mb_mod
+        monkeypatch.setattr(mb_mod, "_compute_dps_trend_for_brief", lambda *a: None)
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        for key in ("date", "whoop", "readiness", "yesterday", "cognitive_debt"):
+            assert key in brief, f"Key '{key}' missing from brief after DPS trend addition"
+
+
+class TestFormatMorningBriefDpsTrend:
+    """Tests for DPS trend rendering in format_morning_brief_message()."""
+
+    def _brief_with_dps_trend(self, dps_trend: dict | None) -> dict:
+        """Build a minimal brief dict with the given dps_trend."""
+        return {
+            "date": "2026-03-14",
+            "whoop": {"recovery_score": 78.0, "hrv_rmssd_milli": 65.0,
+                      "sleep_hours": 7.5, "sleep_performance": 82.0, "resting_heart_rate": 56.0},
+            "readiness": {"tier": "good", "label": "Good", "recommendation": "Productive day."},
+            "yesterday": {"date": "2026-03-13", "avg_cls": 0.45, "meeting_minutes": 90},
+            "hrv_baseline": 70.0,
+            "trend_context": {},
+            "personal_baseline": None,
+            "today_calendar": None,
+            "cognitive_debt": None,
+            "dps_trend": dps_trend,
+        }
+
+    def test_no_dps_trend_section_when_none(self):
+        """When dps_trend is None, no DPS trend line appears in the message."""
+        brief = self._brief_with_dps_trend(None)
+        msg = format_morning_brief_message(brief)
+        assert "Day quality" not in msg
+        assert "📈" not in msg
+        assert "📉" not in msg
+
+    def test_no_dps_trend_section_when_empty_line(self):
+        """When dps_trend has an empty line, no DPS trend appears."""
+        brief = self._brief_with_dps_trend({
+            "mean_dps": 70.0, "delta_dps": 1.0, "trend_direction": "stable",
+            "days_used": 3, "recent_scores": [69, 71, 70], "line": "",
+        })
+        msg = format_morning_brief_message(brief)
+        assert "Day quality" not in msg
+
+    def test_declining_trend_line_appears(self):
+        """Declining DPS trend should render in the message."""
+        brief = self._brief_with_dps_trend({
+            "mean_dps": 63.0,
+            "delta_dps": -15.0,
+            "trend_direction": "declining",
+            "days_used": 5,
+            "recent_scores": [72, 65, 58],
+            "line": "📉 Day quality declining: 72 → 65 → 58 (−15 pts)",
+        })
+        msg = format_morning_brief_message(brief)
+        assert "Day quality declining" in msg
+        assert "📉" in msg
+
+    def test_improving_trend_line_appears(self):
+        """Improving DPS trend should render in the message."""
+        brief = self._brief_with_dps_trend({
+            "mean_dps": 68.0,
+            "delta_dps": 12.0,
+            "trend_direction": "improving",
+            "days_used": 5,
+            "recent_scores": [58, 65, 73],
+            "line": "📈 Day quality improving: 58 → 65 → 73 (+15 pts)",
+        })
+        msg = format_morning_brief_message(brief)
+        assert "Day quality improving" in msg
+        assert "📈" in msg
+
+    def test_stable_trend_line_appears(self):
+        """Stable DPS trend with line set should render."""
+        brief = self._brief_with_dps_trend({
+            "mean_dps": 70.0,
+            "delta_dps": 1.5,
+            "trend_direction": "stable",
+            "days_used": 6,
+            "recent_scores": [69, 72, 70],
+            "line": "➡️ Day quality stable (6d avg: 70/100)",
+        })
+        msg = format_morning_brief_message(brief)
+        assert "Day quality stable" in msg
+        assert "➡️" in msg
+
+    def test_sparkline_scores_appear_in_message(self):
+        """The recent score sparkline should appear in the message."""
+        brief = self._brief_with_dps_trend({
+            "mean_dps": 65.0,
+            "delta_dps": -14.0,
+            "trend_direction": "declining",
+            "days_used": 5,
+            "recent_scores": [78, 65, 52],
+            "line": "📉 Day quality declining: 78 → 65 → 52 (−26 pts)",
+        })
+        msg = format_morning_brief_message(brief)
+        assert "78" in msg
+        assert "65" in msg
+        assert "52" in msg
+
+    def test_dps_trend_appears_after_cdi(self):
+        """DPS trend section should appear after CDI in the message (if both present)."""
+        brief = self._brief_with_dps_trend({
+            "mean_dps": 63.0,
+            "delta_dps": -12.0,
+            "trend_direction": "declining",
+            "days_used": 5,
+            "recent_scores": [72, 65, 58],
+            "line": "📉 Day quality declining: 72 → 65 → 58 (−12 pts)",
+        })
+        brief["cognitive_debt"] = {
+            "cdi": 72,
+            "tier": "fatigued",
+            "line": "🟠 CDI 72/100 — Fatigued (5 deficit days, trend ↑)",
+        }
+        msg = format_morning_brief_message(brief)
+        cdi_pos = msg.find("CDI")
+        dps_pos = msg.find("Day quality")
+        assert cdi_pos >= 0, "CDI line missing from message"
+        assert dps_pos >= 0, "DPS trend line missing from message"
+        assert cdi_pos < dps_pos, "DPS trend should appear after CDI"
+
+    def test_no_crash_when_dps_trend_missing_keys(self):
+        """Partial dps_trend dict (missing keys) should not crash the formatter."""
+        brief = self._brief_with_dps_trend({"line": "📉 Day quality declining: 70 → 60"})
+        msg = format_morning_brief_message(brief)
+        assert isinstance(msg, str)
+
+    def test_no_crash_when_dps_trend_is_empty_dict(self):
+        """Empty dps_trend dict should not crash — just no DPS line in output."""
+        brief = self._brief_with_dps_trend({})
+        msg = format_morning_brief_message(brief)
+        assert isinstance(msg, str)
+        assert "Day quality" not in msg
+
+    def test_no_crash_when_brief_has_no_dps_trend_key(self):
+        """Brief without 'dps_trend' key (old-format brief) should not crash."""
+        brief = self._brief_with_dps_trend(None)
+        del brief["dps_trend"]
+        msg = format_morning_brief_message(brief)
+        assert isinstance(msg, str)
+
+
+class TestFormatDpsTrendLine:
+    """Unit tests for _format_dps_trend_line() directly."""
+
+    def test_import(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        assert callable(_format_dps_trend_line)
+
+    def test_improving_contains_arrow_emoji(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "improving", "delta_dps": 12.0, "mean_dps": 70.0, "days_used": 5}
+        result = _format_dps_trend_line(trend, [60, 68, 74])
+        assert "📈" in result
+
+    def test_declining_contains_down_arrow_emoji(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "declining", "delta_dps": -14.0, "mean_dps": 64.0, "days_used": 5}
+        result = _format_dps_trend_line(trend, [78, 65, 55])
+        assert "📉" in result
+
+    def test_stable_with_enough_days_has_right_arrow(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "stable", "delta_dps": 1.0, "mean_dps": 70.0, "days_used": 5}
+        result = _format_dps_trend_line(trend, [69, 71, 70])
+        assert "➡️" in result
+
+    def test_stable_with_few_days_returns_empty(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "stable", "delta_dps": 1.0, "mean_dps": 70.0, "days_used": 4}
+        result = _format_dps_trend_line(trend, [69, 71, 70])
+        assert result == ""
+
+    def test_improving_includes_plus_delta(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "improving", "delta_dps": 15.0, "mean_dps": 72.0, "days_used": 5}
+        result = _format_dps_trend_line(trend, [58, 68, 74])
+        assert "15" in result
+        assert "+" in result or "pts" in result
+
+    def test_declining_includes_minus_delta(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "declining", "delta_dps": -18.0, "mean_dps": 62.0, "days_used": 5}
+        result = _format_dps_trend_line(trend, [80, 68, 54])
+        assert "18" in result
+        assert "−" in result
+
+    def test_sparkline_scores_appear_in_output(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "improving", "delta_dps": 10.0, "mean_dps": 68.0, "days_used": 4}
+        result = _format_dps_trend_line(trend, [55, 63, 71])
+        assert "55" in result
+        assert "63" in result
+        assert "71" in result
+
+    def test_empty_scores_does_not_crash(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        trend = {"trend_direction": "improving", "delta_dps": 8.0, "mean_dps": 70.0, "days_used": 4}
+        result = _format_dps_trend_line(trend, [])
+        assert isinstance(result, str)
+
+    def test_returns_string_for_all_directions(self):
+        from analysis.morning_brief import _format_dps_trend_line
+        for direction in ("improving", "declining", "stable"):
+            trend = {"trend_direction": direction, "delta_dps": 5.0, "mean_dps": 70.0, "days_used": 5}
+            result = _format_dps_trend_line(trend, [65, 70, 72])
+            assert isinstance(result, str)
+
+
+class TestComputeDpsTrendForBrief:
+    """Unit tests for _compute_dps_trend_for_brief() (the helper wrapper)."""
+
+    def test_returns_none_when_trend_none(self, monkeypatch):
+        """When compute_dps_trend returns None, helper returns None."""
+        import analysis.morning_brief as mb_mod
+        import analysis.presence_score as ps_mod
+        monkeypatch.setattr(ps_mod, "compute_dps_trend", lambda *a, **kw: None)
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: [])
+        from analysis.morning_brief import _compute_dps_trend_for_brief
+        result = _compute_dps_trend_for_brief("2026-03-14")
+        assert result is None
+
+    def test_returns_dict_when_trend_available(self, monkeypatch):
+        """When compute_dps_trend has data, helper returns a dict."""
+        import analysis.presence_score as ps_mod
+        fake_trend = {
+            "mean_dps": 68.0, "delta_dps": -12.0, "trend_direction": "declining",
+            "days_used": 5, "best_day": "2026-03-10", "best_dps": 78.0,
+            "worst_day": "2026-03-14", "worst_dps": 54.0,
+        }
+        fake_history = [
+            {"date": "2026-03-10", "dps": 78.0, "tier": "strong", "is_meaningful": True},
+            {"date": "2026-03-12", "dps": 65.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 54.0, "tier": "moderate", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "compute_dps_trend", lambda *a, **kw: fake_trend)
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake_history)
+        from analysis.morning_brief import _compute_dps_trend_for_brief
+        result = _compute_dps_trend_for_brief("2026-03-14")
+        assert result is not None
+        assert isinstance(result, dict)
+
+    def test_result_has_line_key(self, monkeypatch):
+        """The helper result must include a 'line' key."""
+        import analysis.presence_score as ps_mod
+        fake_trend = {
+            "mean_dps": 68.0, "delta_dps": -12.0, "trend_direction": "declining",
+            "days_used": 5, "best_day": "2026-03-10", "best_dps": 78.0,
+            "worst_day": "2026-03-14", "worst_dps": 54.0,
+        }
+        fake_history = [
+            {"date": "2026-03-12", "dps": 68.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-13", "dps": 62.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 54.0, "tier": "moderate", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "compute_dps_trend", lambda *a, **kw: fake_trend)
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake_history)
+        from analysis.morning_brief import _compute_dps_trend_for_brief
+        result = _compute_dps_trend_for_brief("2026-03-14")
+        assert result is not None
+        assert "line" in result
+
+    def test_graceful_on_exception(self, monkeypatch):
+        """Any exception inside the helper returns None without crashing."""
+        import analysis.presence_score as ps_mod
+        monkeypatch.setattr(ps_mod, "compute_dps_trend",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("fail")))
+        from analysis.morning_brief import _compute_dps_trend_for_brief
+        result = _compute_dps_trend_for_brief("2026-03-14")
+        assert result is None
+
+    def test_result_includes_recent_scores(self, monkeypatch):
+        """Helper must include recent_scores derived from the last 3 history entries."""
+        import analysis.presence_score as ps_mod
+        fake_trend = {
+            "mean_dps": 70.0, "delta_dps": 10.0, "trend_direction": "improving",
+            "days_used": 5, "best_day": "2026-03-14", "best_dps": 75.0,
+            "worst_day": "2026-03-10", "worst_dps": 55.0,
+        }
+        fake_history = [
+            {"date": "2026-03-10", "dps": 55.0, "tier": "moderate", "is_meaningful": True},
+            {"date": "2026-03-11", "dps": 60.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-12", "dps": 65.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-13", "dps": 70.0, "tier": "good", "is_meaningful": True},
+            {"date": "2026-03-14", "dps": 75.0, "tier": "strong", "is_meaningful": True},
+        ]
+        monkeypatch.setattr(ps_mod, "compute_dps_trend", lambda *a, **kw: fake_trend)
+        monkeypatch.setattr(ps_mod, "get_historical_dps", lambda *a, **kw: fake_history)
+        from analysis.morning_brief import _compute_dps_trend_for_brief
+        result = _compute_dps_trend_for_brief("2026-03-14")
+        assert result is not None
+        assert "recent_scores" in result
+        # Last 3 meaningful: 65, 70, 75
+        assert result["recent_scores"] == [65, 70, 75]
