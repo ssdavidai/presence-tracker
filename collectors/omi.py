@@ -11,12 +11,21 @@ Data signals extracted per window:
 - audio_seconds: float — total audio recording duration (including silences)
 - sessions_count: int — number of distinct Omi sessions starting in this window
 - speech_ratio: float — speech_seconds / audio_seconds (how much of recording was speech)
+- topic_category: str — conversation type (work_technical, work_strategic, personal,
+    operational, mixed, unknown). Derived from keyword classification of transcript text.
+- cognitive_density: float — 0.0 (light/casual) → 1.0 (dense/demanding).
+    Combines lexical complexity, keyword density, information rate, and category.
+- cls_weight: float — multiplier for CLS contribution (1.20 for technical, 0.50 for ops)
+- sdi_weight: float — multiplier for SDI contribution (0.60 for technical, 1.20 for personal)
 
 Metric impact:
 - CLS: active conversation = cognitive load (processing + responding in real-time)
-  Word-dense windows signal high cognitive engagement.
-- SDI: spoken conversation = social energy expenditure — even more direct than Slack.
-  Speech time in a window is a strong signal for social drain.
+  Word-dense windows signal high cognitive engagement. v10.0: CLS is now weighted
+  by cognitive_density and topic category — technical discussion contributes more
+  than a casual chat even at the same word count.
+- SDI: spoken conversation is the most direct social-energy signal. v10.0: SDI
+  is weighted by topic — personal chat drains more social energy than a
+  technical briefing at the same duration.
 - FDI: active conversation interrupts deep focus; it's counted as disruption.
 - sources_available: "omi" added when conversation data is present.
 
@@ -54,6 +63,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+# Topic classifier — imported lazily so omi.py stays usable if omi_topics
+# is somehow unavailable (graceful degradation).
+try:
+    from collectors.omi_topics import get_window_topic_profile
+    _TOPIC_CLASSIFICATION_AVAILABLE = True
+except ImportError:
+    try:
+        # Allow running omi.py directly from the project root
+        import sys as _sys
+        from pathlib import Path as _Path
+        _sys.path.insert(0, str(_Path(__file__).parent.parent))
+        from collectors.omi_topics import get_window_topic_profile
+        _TOPIC_CLASSIFICATION_AVAILABLE = True
+    except ImportError:
+        _TOPIC_CLASSIFICATION_AVAILABLE = False
+        def get_window_topic_profile(date_str, window_transcripts):  # type: ignore
+            return {
+                "category": "unknown", "cognitive_density": 0.0,
+                "cls_weight": 1.0, "sdi_weight": 1.0,
+                "topic_signals": [], "language": "unknown",
+            }
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -143,6 +174,8 @@ def collect(date_str: str) -> dict[int, dict]:
 
     # Accumulate per-window stats
     window_data: dict[int, dict] = {}
+    # Keep raw transcript records per window for topic classification (v10.0)
+    window_transcripts: dict[int, list[dict]] = {}
 
     transcript_files = sorted(transcript_dir.glob("*.json"))
     if not transcript_files:
@@ -183,6 +216,7 @@ def collect(date_str: str) -> dict[int, dict]:
                 "sessions_count": 0,
                 "speech_ratio": 0.0,
             }
+            window_transcripts[idx] = []
 
         w = window_data[idx]
         w["conversation_active"] = True
@@ -191,8 +225,15 @@ def collect(date_str: str) -> dict[int, dict]:
         w["audio_seconds"] += audio_secs
         w["sessions_count"] += 1
 
+        # Accumulate raw record for topic classification
+        window_transcripts[idx].append({
+            "text": text,
+            "speech_duration_seconds": speech_secs,
+            "language": record.get("language", ""),
+        })
+
     # Compute speech_ratio per window (avoid division by zero)
-    for w in window_data.values():
+    for idx, w in window_data.items():
         if w["audio_seconds"] > 0:
             w["speech_ratio"] = round(
                 min(1.0, w["speech_seconds"] / w["audio_seconds"]), 4
@@ -203,6 +244,15 @@ def collect(date_str: str) -> dict[int, dict]:
         # Round floats for clean JSONL output
         w["speech_seconds"] = round(w["speech_seconds"], 1)
         w["audio_seconds"] = round(w["audio_seconds"], 1)
+
+        # v10.0: Topic classification — enrich each window with content-aware signals
+        # Gracefully skipped when topic classifier unavailable (returns neutral defaults)
+        topic = get_window_topic_profile(date_str, window_transcripts.get(idx, []))
+        w["topic_category"] = topic["category"]
+        w["cognitive_density"] = topic["cognitive_density"]
+        w["cls_weight"] = topic["cls_weight"]
+        w["sdi_weight"] = topic["sdi_weight"]
+        w["topic_signals"] = topic["topic_signals"]
 
     return window_data
 

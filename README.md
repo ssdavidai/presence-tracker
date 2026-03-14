@@ -178,12 +178,17 @@ Each line in `data/chunks/YYYY-MM-DD.jsonl`:
     "channels_active": 2
   },
   "omi": {
-    "conversation_active": false,
-    "word_count": 0,
-    "speech_seconds": 0.0,
-    "audio_seconds": 0.0,
-    "sessions_count": 0,
-    "speech_ratio": 0.0
+    "conversation_active": true,
+    "word_count": 412,
+    "speech_seconds": 143.0,
+    "audio_seconds": 210.0,
+    "sessions_count": 2,
+    "speech_ratio": 0.681,
+    "topic_category": "work_technical",
+    "cognitive_density": 0.48,
+    "cls_weight": 1.2,
+    "sdi_weight": 0.6,
+    "topic_signals": ["code", "agent", "database"]
   },
   "metrics": {
     "cognitive_load_score": 0.72,
@@ -348,6 +353,7 @@ presence-tracker/
 | **v5.1** | Test coverage expansion — store layer (7→32 tests), Omi assertion fixes |
 | **v5.2** | `scripts/status.py` — system health CLI with 7-section report, `--brief`, `--json` modes |
 | **v7.2** | `MonthlyMLRetrainWorkflow` — automated monthly ML retraining; worker + schedules updated to register all workflows/activities |
+| **v10.0** | Omi conversation topic classifier — keyword-based categorisation (work_technical / work_strategic / personal / operational / mixed); cognitive_density score; CLS and SDI weighted by topic type so technical discussions contribute more CLS and personal chat contributes more SDI |
 
 ---
 

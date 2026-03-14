@@ -251,6 +251,8 @@ def cognitive_load_score(
     rt_active_seconds: int = 0,
     omi_conversation_active: bool = False,
     omi_word_count: int = 0,
+    omi_cognitive_density: float = 0.0,
+    omi_cls_weight: float = 1.0,
 ) -> float:
     """
     Cognitive Load Score — how mentally demanding was this window?
@@ -278,6 +280,13 @@ def cognitive_load_score(
         omi_word_count: int — total words spoken across Omi sessions in window.
             More words = higher engagement = higher CLS.  Saturates at 500 words
             per 15-min window (≈33 words/min = dense conversation).
+        omi_cognitive_density: float (0–1) — content-derived density score from
+            the topic classifier (v10.0).  Combines lexical complexity, keyword
+            density, and information rate.  A technical briefing scores ~0.70;
+            casual chat scores ~0.20.  Used to weight the Omi CLS contribution.
+        omi_cls_weight: float — category multiplier for CLS (v10.0).
+            work_technical=1.20, personal=0.70, operational=0.50.  Scales
+            the entire Omi contribution so topic-appropriate load is applied.
 
     v1.5 — Solo-meeting fix:
         meeting_component and calendar_pressure only fire for social meetings
@@ -295,6 +304,21 @@ def cognitive_load_score(
         This is conservative — Omi adds a nudge rather than dominating the metric.
         A quiet-but-active Omi window (few words) raises CLS by ~0.05 over baseline.
         A word-dense Omi window (>500 words) raises CLS by ~0.08–0.10.
+
+    v10.0 — Topic-aware Omi CLS:
+        The Omi component is now weighted by cognitive_density (content richness)
+        and cls_weight (category multiplier):
+          omi_component = cognitive_density * 0.7 + word_density * 0.3
+          (was: 0.5 + 0.5 * word_density — flat baseline regardless of content)
+          omi_component_weighted = omi_component * cls_weight
+          cls = 0.90 * base_cls + 0.10 * omi_component_weighted
+
+        This means:
+          - Technical discussion (density=0.70, cls_weight=1.20): omi adds ~0.084
+          - Casual chat (density=0.20, cls_weight=0.70): omi adds ~0.018
+          - Errand call (density=0.10, cls_weight=0.50): omi adds ~0.005
+        When topic data is unavailable (classifier not run), falls back to v2.0
+        behaviour (cognitive_density=0, cls_weight=1.0 → baseline 0.5).
     """
     # Component: meeting density
     # v1.5 solo-meeting fix: only fire for social meetings (other attendees present).
@@ -343,17 +367,30 @@ def cognitive_load_score(
         rt_demand = 1.0 - rt_productivity_score
         base_cls = 0.75 * base_cls + 0.25 * rt_demand
 
-    # v2.0: Omi spoken-conversation signal
+    # v2.0 / v10.0: Omi spoken-conversation signal
     # Live spoken conversation is cognitively demanding: David must process speech,
     # formulate verbal responses, and track conversation threads in real time.
     # Word-count density captures engagement depth: a 5-word exchange is light;
     # a 500-word back-and-forth is intense.
     # Saturates at 500 words/window (≈33 wpm, dense conversation for 15 min).
+    #
+    # v10.0: omi_component is now driven primarily by cognitive_density (content
+    # richness from the topic classifier) rather than a flat 0.5 baseline.
+    # Falls back gracefully: when cognitive_density=0 and cls_weight=1.0,
+    # omi_component ≈ 0.5 * word_density, close to v2.0 behaviour.
     if omi_conversation_active:
         word_density = _norm(omi_word_count, max_val=500)
-        # omi_component: 0.5 baseline (just being in conversation) + 0.5 * word density
-        omi_component = 0.5 + 0.5 * word_density
-        cls = 0.90 * base_cls + 0.10 * omi_component
+        # v10.0 formula: density-aware omi_component weighted by topic category
+        # When topic data is present: cognitive_density drives 70%, word_density 30%
+        # When topic data absent (cognitive_density=0): word_density drives the signal
+        # with a 0.5 baseline (matching v2.0 behaviour for backward compatibility)
+        if omi_cognitive_density > 0:
+            omi_component = omi_cognitive_density * 0.7 + word_density * 0.3
+            omi_component_weighted = _clamp(omi_component * omi_cls_weight)
+        else:
+            # Fallback: v2.0 formula (no topic data available)
+            omi_component_weighted = 0.5 + 0.5 * word_density
+        cls = 0.90 * base_cls + 0.10 * omi_component_weighted
     else:
         cls = base_cls
 
@@ -481,6 +518,7 @@ def social_drain_index(
     slack_messages_received: int,
     omi_conversation_active: bool = False,
     omi_speech_seconds: float = 0.0,
+    omi_sdi_weight: float = 1.0,
 ) -> float:
     """
     Social Drain Index — how much social energy was expended?
@@ -514,6 +552,14 @@ def social_drain_index(
       - 900s speech (full window active) adds ~0.15 to SDI
       - 180s speech (typical 3-min Omi session) adds ~0.03 to SDI
       - No Omi: identical to baseline (backward-compatible)
+
+    v10.0 — Topic-aware Omi SDI:
+      The Omi speech component is now scaled by sdi_weight (category multiplier):
+        personal chat (sdi_weight=1.20) → full speech drain (high social cost)
+        technical briefing (sdi_weight=0.60) → reduced drain (less socially costly)
+        operational errand (sdi_weight=0.40) → minimal drain
+      omi_component_weighted = omi_component * omi_sdi_weight
+      When no topic data: sdi_weight=1.0 → identical to v2.0 behaviour.
     """
     # A meeting is "social" only when there is at least one other participant.
     # Solo focus blocks, personal events, and calendar reminders have 0–1 attendee
@@ -539,13 +585,15 @@ def social_drain_index(
         0.20 * sent_ratio
     )
 
-    # v2.0: Omi spoken-conversation signal
+    # v2.0 / v10.0: Omi spoken-conversation signal
     # Spoken conversation is inherently social — it requires real-time engagement
     # with another person and is more draining than text communication.
     # speech_seconds saturates at 900 (full 15-min window of continuous speech).
+    # v10.0: scaled by omi_sdi_weight (topic category multiplier).
     if omi_conversation_active and omi_speech_seconds > 0:
         omi_component = _norm(omi_speech_seconds, max_val=900.0)
-        sdi = 0.85 * base_sdi + 0.15 * omi_component
+        omi_component_weighted = _clamp(omi_component * omi_sdi_weight)
+        sdi = 0.85 * base_sdi + 0.15 * omi_component_weighted
     else:
         sdi = base_sdi
 
@@ -751,11 +799,15 @@ def compute_metrics(window_data: dict) -> dict:
     rt_productivity_score: Optional[float] = rt.get("productivity_score") if rt else None
     rt_active_seconds: int = int(rt.get("active_seconds", 0)) if rt else 0
 
-    # Omi spoken-conversation signals (v2.0)
+    # Omi spoken-conversation signals (v2.0 + v10.0)
     omi_conversation_active: bool = bool(omi.get("conversation_active", False)) if omi else False
     omi_word_count: int = int(omi.get("word_count", 0)) if omi else 0
     omi_speech_seconds: float = float(omi.get("speech_seconds", 0.0)) if omi else 0.0
     omi_speech_ratio: float = float(omi.get("speech_ratio", 0.0)) if omi else 0.0
+    # v10.0: topic classification signals
+    omi_cognitive_density: float = float(omi.get("cognitive_density", 0.0)) if omi else 0.0
+    omi_cls_weight: float = float(omi.get("cls_weight", 1.0)) if omi else 1.0
+    omi_sdi_weight: float = float(omi.get("sdi_weight", 1.0)) if omi else 1.0
 
     cls = cognitive_load_score(
         in_meeting=in_meeting,
@@ -768,6 +820,8 @@ def compute_metrics(window_data: dict) -> dict:
         rt_active_seconds=rt_active_seconds,
         omi_conversation_active=omi_conversation_active,  # v2.0
         omi_word_count=omi_word_count,                    # v2.0
+        omi_cognitive_density=omi_cognitive_density,      # v10.0
+        omi_cls_weight=omi_cls_weight,                    # v10.0
     )
 
     fdi = focus_depth_index(
@@ -789,6 +843,7 @@ def compute_metrics(window_data: dict) -> dict:
         slack_messages_received=slack_received,
         omi_conversation_active=omi_conversation_active,  # v2.0
         omi_speech_seconds=omi_speech_seconds,            # v2.0
+        omi_sdi_weight=omi_sdi_weight,                    # v10.0
     )
 
     csc = context_switch_cost(

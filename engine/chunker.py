@@ -163,11 +163,13 @@ def build_windows(
             "top_activity": window_rt.get("top_activity"),
         } if rt_windows else None
 
-        # ── Omi transcript signals (v2.0) ─────────────────────────────────
+        # ── Omi transcript signals (v2.0, v10.0) ─────────────────────────
         # The Omi collector returns only windows that had ≥1 transcript session.
         # For windows without Omi data, omi_signals is None (key omitted from JSONL).
         # This keeps the schema clean: downstream code can detect Omi presence by
         # checking for the "omi" key rather than checking conversation_active.
+        # v10.0: topic_category, cognitive_density, cls_weight, sdi_weight, and
+        # topic_signals are now included when the topic classifier ran successfully.
         omi_ws = omi_windows or {}
         window_omi_raw = omi_ws.get(i)  # None if no Omi data for this window
         if window_omi_raw is not None:
@@ -178,6 +180,12 @@ def build_windows(
                 "audio_seconds": window_omi_raw.get("audio_seconds", 0.0),
                 "sessions_count": window_omi_raw.get("sessions_count", 0),
                 "speech_ratio": window_omi_raw.get("speech_ratio", 0.0),
+                # v10.0 topic classification fields (present when classifier ran)
+                "topic_category": window_omi_raw.get("topic_category", "unknown"),
+                "cognitive_density": window_omi_raw.get("cognitive_density", 0.0),
+                "cls_weight": window_omi_raw.get("cls_weight", 1.0),
+                "sdi_weight": window_omi_raw.get("sdi_weight", 1.0),
+                "topic_signals": window_omi_raw.get("topic_signals", []),
             }
         else:
             omi_signals = None

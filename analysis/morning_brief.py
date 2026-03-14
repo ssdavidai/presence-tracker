@@ -624,6 +624,11 @@ def compute_morning_brief(
         # worse even if CDI isn't yet signalling alarm — early warning before fatigue peaks.
         # Returns None when < 3 days of history exist (graceful degradation).
         "dps_trend": _compute_dps_trend_for_brief(today_date),
+        # v10.0: Tomorrow's Focus Plan — specific time blocks for deep work tomorrow.
+        # Uses historical hourly FDI pattern + tomorrow's calendar + CDI to recommend
+        # when to protect focused work time.  Answers: "When should I block focus time?"
+        # Returns None when tomorrow_calendar is unavailable (graceful degradation).
+        "tomorrow_focus_plan": _compute_focus_plan_for_brief(today_date, today_calendar),
     }
 
 
@@ -698,6 +703,38 @@ def _compute_dps_trend_for_brief(date_str: str) -> Optional[dict]:
             "days_used": trend["days_used"],
             "recent_scores": recent_scores,
             "line": line,
+        }
+    except Exception:
+        return None
+
+
+def _compute_focus_plan_for_brief(today_date_str: str, today_calendar: Optional[dict] = None) -> Optional[dict]:
+    """
+    Compute tomorrow's focus plan for the morning brief.
+
+    Uses the Focus Planner to find the best available deep-work windows for
+    tomorrow, factoring in David's historical peak-FDI hours, CDI tier, and
+    tomorrow's calendar schedule.
+
+    The today_calendar parameter is unused here (it's today's, not tomorrow's).
+    The Focus Planner fetches tomorrow's calendar itself.
+
+    Returns a dict with serialised FocusPlan data, or None on error / no data.
+
+    v10.0: Added focus plan to morning brief.
+    """
+    try:
+        from analysis.focus_planner import plan_tomorrow_focus, format_focus_plan_section
+        plan = plan_tomorrow_focus(today_date_str)
+        if plan is None:
+            return None
+        return {
+            "section": format_focus_plan_section(plan),
+            "summary_line": plan.summary_line,
+            "advisory": plan.advisory,
+            "is_meaningful": plan.is_meaningful,
+            "block_count": len(plan.recommended_blocks),
+            "cdi_tier": plan.cdi_tier,
         }
     except Exception:
         return None
@@ -889,6 +926,17 @@ def format_morning_brief_message(brief: dict) -> str:
         if dps_trend_line:
             lines.append("")
             lines.append(f"_{dps_trend_line}_")
+
+    # ── Tomorrow's Focus Plan (v10.0) ─────────────────────────────────────
+    # Specific time blocks for deep work tomorrow, combining:
+    # - David's historical peak-FDI hours (when does he actually focus best?)
+    # - Tomorrow's calendar free windows
+    # - CDI tier (how much cognitive debt is he carrying?)
+    # This is the "what to do" complement to all the "what happened" signals above.
+    tomorrow_plan = brief.get("tomorrow_focus_plan")
+    if tomorrow_plan and tomorrow_plan.get("is_meaningful") and tomorrow_plan.get("section"):
+        lines.append("")
+        lines.append(tomorrow_plan["section"])
 
     # ── Today's Schedule (v7.0) ───────────────────────────────────────────
     # Show what's on the calendar today so David can see the shape of his day.
