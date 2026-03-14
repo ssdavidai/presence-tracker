@@ -141,7 +141,7 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
     # ── Step 7: Update rolling summary ───────────────────────────────────
     update_summary(summary)
 
-    # ── Step 8: Log digest to Slack ───────────────────────────────────────
+    # ── Step 8: Log digest to #alfred-logs ───────────────────────────────
     recovery = whoop_data.get("recovery_score")
     hrv = whoop_data.get("hrv_rmssd_milli")
     avg_cls = summary.get("metrics_avg", {}).get("cognitive_load_score")
@@ -155,6 +155,13 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
         f"Meetings: {meeting_mins} min | Windows: {len(windows)}"
     )
     _slack_log(log_msg)
+
+    # ── Step 9: Send personal daily digest DM to David ────────────────────
+    try:
+        from analysis.daily_digest import send_daily_digest
+        send_daily_digest(windows)
+    except Exception as e:
+        print(f"[presence] Daily digest failed (non-fatal): {e}", file=sys.stderr)
 
     # Daily alert check
     if recovery is not None and recovery < 50 and avg_cls and avg_cls > 0.70:
