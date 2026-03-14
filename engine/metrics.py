@@ -62,6 +62,30 @@ v1.4 — Solo-meeting fix (SDI + FDI):
   Impact: solo calendar blocks now return SDI ≈ 0 and FDI ≈ 1.0 (appropriate).
     Social meetings are unaffected (>1 attendees still fires the full signal).
     This corrects a systematic overestimation of social drain for personal events.
+
+v1.5 — Solo-meeting fix extended to CLS:
+  Cognitive Load Score (CLS) now also distinguishes social meetings from solo
+  calendar blocks, completing the fix started in v1.4 for SDI and FDI.
+
+  Problem: meeting_component (0.35 weight) fired for ANY in_meeting=True window,
+  giving solo focus blocks (attendees=0 or 1) CLS ≈ 0.40 — identical to a social
+  meeting.  This inflated daily-average CLS on days with deliberate focus blocks,
+  and misrepresented what the signal actually measures (external coordination
+  overhead, not internal thinking effort).
+
+  CLS fix: meeting_component and calendar_pressure now only fire for social meetings
+    (meeting_attendees > 1).  A solo calendar block contributes only the
+    physiological baseline (recovery_inverse) and any Slack activity to CLS.
+    This is semantically correct: CLS captures external cognitive demand
+    (meetings, interruptions, coordination) not internal focus effort.
+
+  Impact:
+    - Solo focus block: CLS ≈ 0.04–0.07 (from recovery_inverse only) → meaningful
+    - Social meeting:   CLS ≈ 0.35–0.65 (full meeting signal) → unchanged
+    - Daily-average CLS on focus-block days drops meaningfully, reflecting real load
+    - RAS improves correctly for focused days (was penalised by inflated CLS)
+
+  Consistency: CLS, FDI, and SDI now all use the same is_social_meeting gate.
 """
 
 from typing import Optional
@@ -185,14 +209,28 @@ def cognitive_load_score(
         rt_active_seconds: total active computer time in this window (0–900).
             Used to gate the RT signal: if the computer was idle, RT
             distraction data is not meaningful.
+
+    v1.5 — Solo-meeting fix:
+        meeting_component and calendar_pressure only fire for social meetings
+        (meeting_attendees > 1).  A solo calendar block (focus session,
+        personal event, attendees=0/1) does NOT generate the coordination
+        and participation overhead that meeting_component captures.
+        Consistent with the v1.4 solo-meeting fix applied to FDI and SDI.
     """
     # Component: meeting density
-    # 1.0 if in a meeting, 0.0 if not
-    meeting_component = 1.0 if in_meeting else 0.0
+    # v1.5 solo-meeting fix: only fire for social meetings (other attendees present).
+    # A solo calendar block (focus session, personal event, attendees=0/1) does NOT
+    # generate external coordination overhead — it IS protected focus time.
+    # CLS captures external cognitive demand (coordination, meetings, interruptions),
+    # not internal thinking effort.  Solo blocks contribute only the physiological
+    # baseline (recovery_inverse) and any Slack interruptions.
+    is_social_meeting = in_meeting and meeting_attendees > 1
+    meeting_component = 1.0 if is_social_meeting else 0.0
 
     # Component: calendar pressure
-    # Normalized by max expected attendees (10)
-    calendar_pressure = _norm(meeting_attendees if in_meeting else 0, max_val=10)
+    # Normalized by max expected attendees (10).
+    # Only fires for social meetings (attendee_count only meaningful when social).
+    calendar_pressure = _norm(meeting_attendees if is_social_meeting else 0, max_val=10)
 
     # Component: Slack volume
     # 30 messages in 15 min = saturation

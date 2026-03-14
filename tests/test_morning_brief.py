@@ -441,3 +441,206 @@ class TestEdgeCases:
         brief = compute_morning_brief("2026-03-14", _whoop(hrv=65.0), hrv_baseline=0.1)
         msg = format_morning_brief_message(brief)
         assert isinstance(msg, str)
+
+
+# ─── v1.5: Trend context ─────────────────────────────────────────────────────
+
+def _trend(
+    days=4,
+    hrv_trend="stable",
+    hrv_streak=0,
+    hrv_vs_baseline=None,
+    hrv_baseline_ms=None,
+    recovery_trend="stable",
+    recovery_streak=0,
+    overcapacity_streak=0,
+    cls_vs_baseline=None,
+    note="",
+):
+    """Build a synthetic trend_context dict for tests."""
+    return {
+        "days_of_data": days,
+        "hrv_trend": hrv_trend,
+        "hrv_streak_days": hrv_streak,
+        "hrv_vs_baseline": hrv_vs_baseline,
+        "hrv_baseline_ms": hrv_baseline_ms,
+        "recovery_trend": recovery_trend,
+        "recovery_streak_days": recovery_streak,
+        "overcapacity_streak": overcapacity_streak,
+        "cls_vs_baseline": cls_vs_baseline,
+        "note": note,
+    }
+
+
+class TestComputeMorningBriefTrendContext:
+    """Test that compute_morning_brief correctly stores trend_context."""
+
+    def test_trend_context_stored_in_brief(self):
+        tc = _trend(days=3, hrv_trend="declining", hrv_streak=2)
+        brief = compute_morning_brief("2026-03-14", _whoop(), trend_context=tc)
+        assert "trend_context" in brief
+        assert brief["trend_context"]["hrv_trend"] == "declining"
+
+    def test_none_trend_context_stored_as_empty_dict(self):
+        brief = compute_morning_brief("2026-03-14", _whoop(), trend_context=None)
+        assert brief["trend_context"] == {}
+
+    def test_empty_trend_context_stored_as_empty_dict(self):
+        brief = compute_morning_brief("2026-03-14", _whoop(), trend_context={})
+        assert brief["trend_context"] == {}
+
+    def test_trend_context_has_required_keys_when_provided(self):
+        tc = _trend(days=5)
+        brief = compute_morning_brief("2026-03-14", _whoop(), trend_context=tc)
+        assert brief["trend_context"].get("days_of_data") == 5
+
+    def test_existing_keys_still_present_with_trend(self):
+        """Adding trend_context must not break the existing brief structure."""
+        tc = _trend(days=2)
+        brief = compute_morning_brief("2026-03-14", _whoop(), trend_context=tc)
+        assert "date" in brief
+        assert "whoop" in brief
+        assert "readiness" in brief
+        assert "yesterday" in brief
+        assert "hrv_baseline" in brief
+
+    def test_backward_compat_no_trend_param(self):
+        """Callers that don't pass trend_context must still work."""
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        assert isinstance(brief, dict)
+        assert brief["trend_context"] == {}
+
+
+class TestFormatMorningBriefTrendSection:
+    """Test that format_morning_brief_message renders trend context correctly."""
+
+    def _brief_with_trend(self, tc):
+        return compute_morning_brief("2026-03-14", _whoop(), trend_context=tc)
+
+    def test_no_pattern_section_when_no_trend_data(self):
+        brief = self._brief_with_trend({})
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" not in msg
+
+    def test_no_pattern_section_when_days_of_data_lt_2(self):
+        tc = _trend(days=1, hrv_trend="declining", hrv_streak=2)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" not in msg
+
+    def test_pattern_section_shown_when_hrv_declining(self):
+        tc = _trend(days=4, hrv_trend="declining", hrv_streak=3)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" in msg
+        assert "HRV declining" in msg
+        assert "3" in msg
+
+    def test_pattern_section_shown_when_hrv_improving(self):
+        tc = _trend(days=4, hrv_trend="improving", hrv_streak=2)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" in msg
+        assert "HRV improving" in msg
+
+    def test_no_hrv_trend_shown_for_single_day_streak(self):
+        # hrv_streak=1 is below the ≥2 threshold
+        tc = _trend(days=3, hrv_trend="declining", hrv_streak=1)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "HRV declining" not in msg
+
+    def test_overcapacity_streak_shown(self):
+        tc = _trend(days=5, overcapacity_streak=3)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" in msg
+        assert "capacity" in msg
+        assert "3" in msg
+
+    def test_single_overcapacity_day_not_shown(self):
+        # overcapacity_streak=1 is below the ≥2 threshold
+        tc = _trend(days=3, overcapacity_streak=1)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Above capacity" not in msg
+
+    def test_recovery_decline_streak_shown(self):
+        tc = _trend(days=4, recovery_trend="declining", recovery_streak=2)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" in msg
+        assert "Recovery declining" in msg
+
+    def test_cls_above_baseline_shown_when_significant(self):
+        # 40% above baseline should surface
+        tc = _trend(days=5, cls_vs_baseline=40.0)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" in msg
+        assert "above" in msg.lower()
+        assert "40" in msg
+
+    def test_cls_below_baseline_shown_when_significant(self):
+        tc = _trend(days=5, cls_vs_baseline=-30.0)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" in msg
+        assert "below" in msg.lower()
+
+    def test_small_cls_deviation_not_shown(self):
+        # 10% is below the 25% threshold
+        tc = _trend(days=5, cls_vs_baseline=10.0)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "baseline" not in msg
+
+    def test_stable_trend_no_pattern_section(self):
+        tc = _trend(days=5, hrv_trend="stable", hrv_streak=0, overcapacity_streak=0)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "Pattern:" not in msg
+
+    def test_multiple_signals_all_shown(self):
+        tc = _trend(
+            days=5,
+            hrv_trend="declining", hrv_streak=3,
+            overcapacity_streak=2,
+            recovery_trend="declining", recovery_streak=2,
+        )
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "HRV declining" in msg
+        assert "capacity" in msg.lower()
+        assert "Recovery declining" in msg
+
+    def test_pattern_section_appears_after_recommendation(self):
+        tc = _trend(days=4, hrv_trend="declining", hrv_streak=2)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        rec_pos = msg.find("Today:")
+        pattern_pos = msg.find("Pattern:")
+        assert rec_pos < pattern_pos, "Pattern section should appear after Today: recommendation"
+
+    def test_warning_emoji_present_for_declining_hrv(self):
+        tc = _trend(days=4, hrv_trend="declining", hrv_streak=2)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "⚠️" in msg
+
+    def test_checkmark_emoji_present_for_improving_hrv(self):
+        tc = _trend(days=4, hrv_trend="improving", hrv_streak=2)
+        brief = self._brief_with_trend(tc)
+        msg = format_morning_brief_message(brief)
+        assert "✅" in msg
+
+    def test_empty_brief_with_trend_doesnt_crash(self):
+        msg = format_morning_brief_message({})
+        assert isinstance(msg, str)
+
+    def test_trend_context_none_in_brief_doesnt_crash(self):
+        brief = compute_morning_brief("2026-03-14", _whoop())
+        brief["trend_context"] = None  # Simulate None stored
+        msg = format_morning_brief_message(brief)
+        assert isinstance(msg, str)
+        assert "Pattern:" not in msg

@@ -929,3 +929,144 @@ class TestComputeMetricsRescueTimePassthrough:
         metrics = compute_metrics(self._window(rt_data))
         for name, val in metrics.items():
             assert 0.0 <= val <= 1.0, f"Metric {name} out of range with RT: {val}"
+
+
+class TestCLSSoloMeetingFix:
+    """
+    v1.5 — Solo-meeting fix for CLS.
+
+    A solo calendar block (attendees=0 or 1) should not trigger the
+    meeting_component (0.35 weight) in CLS.  Only social meetings
+    (attendees > 1) generate external coordination overhead that CLS
+    captures.  This is consistent with the v1.4 FDI and SDI fixes.
+    """
+
+    def _cls(self, in_meeting, attendees, recovery=80.0, slack_recv=0):
+        return cognitive_load_score(
+            in_meeting=in_meeting,
+            meeting_attendees=attendees,
+            slack_messages_received=slack_recv,
+            recovery_score=recovery,
+        )
+
+    def test_solo_block_no_attendees_equals_no_meeting_cls(self):
+        """A solo block with 0 attendees should give the same CLS as no meeting at all."""
+        cls_no_meeting = self._cls(in_meeting=False, attendees=0)
+        cls_solo_0 = self._cls(in_meeting=True, attendees=0)
+        assert cls_no_meeting == cls_solo_0, (
+            f"Solo block (atts=0) should equal no-meeting CLS. "
+            f"no_meeting={cls_no_meeting}, solo_0={cls_solo_0}"
+        )
+
+    def test_solo_block_one_attendee_equals_no_meeting_cls(self):
+        """A solo block with attendee_count=1 (just David) should give same CLS as no meeting."""
+        cls_no_meeting = self._cls(in_meeting=False, attendees=0)
+        cls_solo_1 = self._cls(in_meeting=True, attendees=1)
+        assert cls_no_meeting == cls_solo_1, (
+            f"Solo block (atts=1) should equal no-meeting CLS. "
+            f"no_meeting={cls_no_meeting}, solo_1={cls_solo_1}"
+        )
+
+    def test_social_meeting_two_attendees_raises_cls(self):
+        """A meeting with 2+ attendees (social) should have higher CLS than no meeting."""
+        cls_no_meeting = self._cls(in_meeting=False, attendees=0)
+        cls_social = self._cls(in_meeting=True, attendees=2)
+        assert cls_social > cls_no_meeting, (
+            f"Social meeting (atts=2) should raise CLS vs no meeting. "
+            f"social={cls_social}, no_meeting={cls_no_meeting}"
+        )
+
+    def test_social_meeting_significantly_higher_than_solo_block(self):
+        """The gap between social meeting and solo block should be substantial (>0.20)."""
+        cls_solo = self._cls(in_meeting=True, attendees=1, recovery=80.0)
+        cls_social = self._cls(in_meeting=True, attendees=4, recovery=80.0)
+        diff = cls_social - cls_solo
+        assert diff >= 0.20, (
+            f"Social meeting CLS should be significantly higher than solo block. "
+            f"social={cls_social}, solo={cls_solo}, diff={diff}"
+        )
+
+    def test_solo_block_is_low_regardless_of_meeting_flag(self):
+        """Solo blocks should always return low CLS (< 0.20) when recovery is good."""
+        for recovery in [70.0, 80.0, 90.0, 100.0]:
+            cls = self._cls(in_meeting=True, attendees=1, recovery=recovery)
+            assert cls < 0.20, (
+                f"Solo block with good recovery should be low CLS, got {cls} "
+                f"(recovery={recovery})"
+            )
+
+    def test_large_social_meeting_high_cls(self):
+        """Large social meeting (10 people) should still produce high CLS."""
+        cls = self._cls(in_meeting=True, attendees=10, recovery=80.0)
+        assert cls > 0.40, f"Large meeting should be high CLS, got {cls}"
+
+    def test_solo_block_with_slack_adds_slack_component_only(self):
+        """Solo block with Slack messages should raise CLS via Slack component only."""
+        cls_solo_no_slack = self._cls(in_meeting=True, attendees=1, slack_recv=0)
+        cls_solo_with_slack = self._cls(in_meeting=True, attendees=1, slack_recv=15)
+        assert cls_solo_with_slack > cls_solo_no_slack, (
+            "Slack messages in a solo block should still raise CLS via Slack component"
+        )
+        # But should still be lower than a social meeting with same slack
+        cls_social_with_slack = self._cls(in_meeting=True, attendees=4, slack_recv=15)
+        assert cls_solo_with_slack < cls_social_with_slack, (
+            "Solo block + slack should still be lower than social meeting + slack"
+        )
+
+    def test_cls_output_range_with_solo_blocks(self):
+        """All CLS values should remain in [0, 1] for solo blocks."""
+        for attendees in [0, 1]:
+            for recovery in [0, 50, 100, None]:
+                for slack_recv in [0, 10, 30]:
+                    cls = cognitive_load_score(
+                        in_meeting=True,
+                        meeting_attendees=attendees,
+                        slack_messages_received=slack_recv,
+                        recovery_score=recovery,
+                    )
+                    assert 0.0 <= cls <= 1.0, (
+                        f"CLS out of range: {cls} "
+                        f"(solo, atts={attendees}, recovery={recovery}, slack={slack_recv})"
+                    )
+
+    def test_compute_metrics_solo_block_low_cls(self):
+        """compute_metrics pipeline: solo block should produce low CLS end-to-end."""
+        window = {
+            "calendar": {
+                "in_meeting": True,
+                "meeting_attendees": 1,
+                "meeting_duration_minutes": 60,
+            },
+            "whoop": {
+                "recovery_score": 85.0,
+                "hrv_rmssd_milli": 70.0,
+                "sleep_performance": 88.0,
+            },
+            "slack": {
+                "messages_sent": 0,
+                "messages_received": 0,
+                "channels_active": 0,
+            },
+        }
+        metrics = compute_metrics(window)
+        assert metrics["cognitive_load_score"] < 0.15, (
+            f"Solo block end-to-end should have low CLS, got {metrics['cognitive_load_score']}"
+        )
+
+    def test_compute_metrics_solo_vs_social_cls_ordering(self):
+        """compute_metrics: social meeting CLS must exceed solo block CLS substantially."""
+        solo_window = {
+            "calendar": {"in_meeting": True, "meeting_attendees": 1, "meeting_duration_minutes": 60},
+            "whoop": {"recovery_score": 80.0},
+            "slack": {"messages_sent": 0, "messages_received": 0, "channels_active": 0},
+        }
+        social_window = {
+            "calendar": {"in_meeting": True, "meeting_attendees": 5, "meeting_duration_minutes": 60},
+            "whoop": {"recovery_score": 80.0},
+            "slack": {"messages_sent": 2, "messages_received": 8, "channels_active": 2},
+        }
+        cls_solo = compute_metrics(solo_window)["cognitive_load_score"]
+        cls_social = compute_metrics(social_window)["cognitive_load_score"]
+        assert cls_social > cls_solo + 0.25, (
+            f"Social meeting CLS ({cls_social}) should be >> solo block CLS ({cls_solo})"
+        )
