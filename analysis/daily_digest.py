@@ -18,6 +18,27 @@ v1.2 — Multi-day trend context:
   - HRV vs personal baseline (today vs 7-day average)
   The most significant trend is surfaced as the insight, replacing generic
   single-day observations with multi-day pattern detection.
+
+v1.3 — Hourly CLS sparkline:
+  The digest now includes a compact hourly cognitive load curve covering
+  all working hours (7am–10pm).  Each hour maps to one character:
+    ░ = very light (< 0.10)   — idle / no demand
+    ▒ = light     (0.10–0.25) — low engagement
+    ▓ = moderate  (0.25–0.50) — meaningful load
+    █ = heavy     (≥ 0.50)    — high cognitive demand
+
+  The sparkline gives an at-a-glance picture of when load was heavy or
+  light across the full day — something no single average number conveys.
+  It also pinpoints where peak effort was concentrated (e.g. morning
+  vs afternoon) and shows idle blocks between active periods.
+
+  Implementation:
+  - compute_hourly_cls_curve() aggregates per-window CLS into hourly means
+    across the 7am–10pm working window (15 hours = 15 chars)
+  - _format_hourly_sparkline() renders the array to a Unicode block string
+  - Both are pure functions with no external dependencies, fully testable
+  - The sparkline is added to the digest dict as "hourly_cls_curve" and
+    rendered in format_digest_message() as a single compact line
 """
 
 import json
@@ -85,6 +106,91 @@ def _fdi_label(fdi: float) -> str:
         return "fragmented"
     else:
         return "highly fragmented"
+
+
+# ─── Hourly CLS sparkline ─────────────────────────────────────────────────────
+
+# Working hours covered by the sparkline (inclusive start, exclusive end)
+_SPARKLINE_START_HOUR = 7
+_SPARKLINE_END_HOUR = 22  # up to but not including 22:00
+
+# Unicode block characters ordered from light → heavy load
+# Each threshold is the *lower bound* for that character
+_SPARKLINE_THRESHOLDS = [
+    (0.50, "█"),   # heavy
+    (0.25, "▓"),   # moderate
+    (0.10, "▒"),   # light
+    (0.0,  "░"),   # very light / idle
+]
+
+
+def compute_hourly_cls_curve(windows: list[dict]) -> list[Optional[float]]:
+    """
+    Compute mean CLS per working hour for the sparkline.
+
+    Returns a list of length (_SPARKLINE_END_HOUR - _SPARKLINE_START_HOUR),
+    i.e. one value per hour from 7am to 9pm (15 values for 7–21 inclusive).
+    Each entry is the mean CLS across the four 15-min windows in that hour,
+    or None if no windows existed for that hour (should not happen in practice).
+
+    Uses *all* working-hour windows (not just active ones) because a quiet
+    hour with CLS=0.02 is meaningfully different from no data at all, and
+    the sparkline is intended to show the full shape of the day.
+
+    Args:
+        windows: list of 96 window dicts for a single day
+
+    Returns:
+        list[Optional[float]]: hourly mean CLS values, length 15
+    """
+    n_hours = _SPARKLINE_END_HOUR - _SPARKLINE_START_HOUR
+    hourly: list[list[float]] = [[] for _ in range(n_hours)]
+
+    for w in windows:
+        h = w["metadata"]["hour_of_day"]
+        if _SPARKLINE_START_HOUR <= h < _SPARKLINE_END_HOUR:
+            idx = h - _SPARKLINE_START_HOUR
+            hourly[idx].append(w["metrics"]["cognitive_load_score"])
+
+    result: list[Optional[float]] = []
+    for vals in hourly:
+        if vals:
+            result.append(round(sum(vals) / len(vals), 4))
+        else:
+            result.append(None)
+    return result
+
+
+def _format_hourly_sparkline(hourly_cls: list[Optional[float]]) -> str:
+    """
+    Render a list of hourly CLS means as a Unicode block sparkline string.
+
+    Each value maps to one character based on its magnitude:
+      ░ < 0.10  (very light — idle or minimal engagement)
+      ▒ 0.10–0.25  (light — some activity)
+      ▓ 0.25–0.50  (moderate — meaningful cognitive load)
+      █ ≥ 0.50  (heavy — high demand)
+
+    None values (missing data) render as a dash character.
+
+    Args:
+        hourly_cls: list of Optional[float] from compute_hourly_cls_curve()
+
+    Returns:
+        str: e.g. "░░░▒▓▓█▓▒░░░░░░"
+    """
+    chars = []
+    for val in hourly_cls:
+        if val is None:
+            chars.append("·")
+            continue
+        char = "░"  # default: very light
+        for threshold, symbol in _SPARKLINE_THRESHOLDS:
+            if val >= threshold:
+                char = symbol
+                break
+        chars.append(char)
+    return "".join(chars)
 
 
 # ─── Multi-day trend context ─────────────────────────────────────────────────
@@ -409,6 +515,11 @@ def compute_digest(windows: list[dict]) -> dict:
         trend=trend,
     )
 
+    # ── Hourly CLS curve (v1.3) ────────────────────────────────────────────
+    # Compact per-hour cognitive load breakdown covering 7am–10pm.
+    # Provides the temporal shape of the day — not just average and peak.
+    hourly_cls_curve = compute_hourly_cls_curve(windows)
+
     return {
         "date": date_str,
         "whoop": {
@@ -437,6 +548,8 @@ def compute_digest(windows: list[dict]) -> dict:
         "peak_window": peak_window,
         "trend": trend,
         "insight": insight,
+        # v1.3: hourly CLS sparkline data (list of 15 floats, 7am–9pm)
+        "hourly_cls_curve": hourly_cls_curve,
     }
 
 
@@ -622,6 +735,7 @@ def format_digest_message(digest: dict) -> str:
 
     peak_window = digest.get("peak_window")
     insight = digest.get("insight", "")
+    hourly_cls_curve = digest.get("hourly_cls_curve")
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -654,6 +768,14 @@ def format_digest_message(digest: dict) -> str:
             lines.append(f"  Peak: {peak_cls:.0%}{peak_info}")
     else:
         lines.append("*Cognitive Load* — no data")
+
+    # ── Hourly CLS sparkline (v1.3) ──
+    # Compact temporal view of cognitive load from 7am to 10pm.
+    # Shows the shape of the day — where effort was concentrated.
+    # Legend: ░ idle  ▒ light  ▓ moderate  █ heavy
+    if hourly_cls_curve:
+        sparkline = _format_hourly_sparkline(hourly_cls_curve)
+        lines.append(f"  `7am {sparkline} 10pm`")
 
     # ── Focus quality (active windows only) ──
     if avg_fdi is not None and active_windows > 0:

@@ -658,3 +658,264 @@ class TestComputeTrendContext:
         # If trend is detected, hrv_trend should indicate decline
         if "hrv_trend" in result:
             assert result["hrv_trend"] in ("declining", "improving", "stable")
+
+
+# ─── Hourly CLS sparkline tests (v1.3) ───────────────────────────────────────
+
+class TestComputeHourlyCLSCurve:
+    """Tests for the hourly CLS aggregation function."""
+
+    def _make_windows(self, cls_by_hour: dict[int, float]) -> list[dict]:
+        """
+        Build a minimal 96-window list where each working hour has the
+        given CLS value (same for all 4 × 15-min windows in that hour).
+        Non-specified hours default to 0.0 CLS.
+        """
+        windows = []
+        for h in range(24):
+            for q in range(4):
+                window = {
+                    "metadata": {
+                        "hour_of_day": h,
+                        "minute_of_hour": q * 15,
+                        "is_working_hours": 7 <= h < 22,
+                    },
+                    "metrics": {
+                        "cognitive_load_score": cls_by_hour.get(h, 0.0),
+                    },
+                }
+                windows.append(window)
+        return windows
+
+    def test_returns_list_of_length_15(self):
+        """Should always return exactly 15 values (7am–9pm inclusive)."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        windows = self._make_windows({})
+        result = compute_hourly_cls_curve(windows)
+        assert len(result) == 15, f"Expected 15 values, got {len(result)}"
+
+    def test_covers_hours_7_to_21(self):
+        """Index 0 = 7am, index 14 = 9pm (21:00)."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        # Set hour 9 (index 2) to a distinctive value
+        windows = self._make_windows({9: 0.75})
+        result = compute_hourly_cls_curve(windows)
+        assert result[2] == pytest.approx(0.75, abs=0.001), \
+            f"Hour 9 (index 2) should be 0.75, got {result[2]}"
+        # Hour 8 (index 1) should be 0.0
+        assert result[1] == pytest.approx(0.0, abs=0.001), \
+            f"Hour 8 (index 1) should be 0.0, got {result[1]}"
+
+    def test_averages_four_windows_per_hour(self):
+        """Each hour = mean of up to 4 × 15-min windows."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        # Build windows manually with varying CLS within one hour
+        windows = []
+        for h in range(24):
+            for q in range(4):
+                cls = 0.0
+                if h == 10:
+                    cls = [0.1, 0.3, 0.5, 0.7][q]  # avg = 0.4
+                window = {
+                    "metadata": {
+                        "hour_of_day": h,
+                        "minute_of_hour": q * 15,
+                        "is_working_hours": 7 <= h < 22,
+                    },
+                    "metrics": {"cognitive_load_score": cls},
+                }
+                windows.append(window)
+
+        result = compute_hourly_cls_curve(windows)
+        idx_10 = 10 - 7  # = 3
+        assert result[idx_10] == pytest.approx(0.4, abs=0.001), \
+            f"Hour 10 mean should be 0.40, got {result[idx_10]}"
+
+    def test_excludes_hours_before_7am(self):
+        """Hours before 7am should NOT appear in the output."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        # Set hours 0–6 to a distinctive value; they should not affect output
+        windows = self._make_windows({h: 0.99 for h in range(7)})
+        result = compute_hourly_cls_curve(windows)
+        # All working hours were NOT given values so should be 0.0 (default)
+        assert all(v == pytest.approx(0.0, abs=0.001) for v in result if v is not None), \
+            "No pre-7am hours should appear in the sparkline"
+
+    def test_excludes_hours_at_or_after_10pm(self):
+        """Hours 22 and beyond should NOT appear in the output."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        windows = self._make_windows({22: 0.99, 23: 0.99})
+        result = compute_hourly_cls_curve(windows)
+        # Working hours 7–21 were not set, so all should be 0.0
+        assert all(v == pytest.approx(0.0, abs=0.001) for v in result if v is not None)
+
+    def test_empty_windows_returns_nones_or_zeros(self):
+        """Empty window list returns list of 15 Nones (no data)."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        result = compute_hourly_cls_curve([])
+        assert len(result) == 15
+        assert all(v is None for v in result)
+
+    def test_all_values_in_0_1_range(self):
+        """No value should exceed [0, 1] since CLS is bounded."""
+        from analysis.daily_digest import compute_hourly_cls_curve
+        windows = self._make_windows({h: 0.85 for h in range(7, 22)})
+        result = compute_hourly_cls_curve(windows)
+        for i, val in enumerate(result):
+            if val is not None:
+                assert 0.0 <= val <= 1.0, f"Index {i}: {val} out of [0,1]"
+
+
+class TestFormatHourlySparkline:
+    """Tests for the sparkline renderer."""
+
+    def test_correct_length_for_15_values(self):
+        """Output should be exactly 15 characters for 15 inputs."""
+        from analysis.daily_digest import _format_hourly_sparkline
+        result = _format_hourly_sparkline([0.05] * 15)
+        assert len(result) == 15, f"Expected 15 chars, got {len(result)}"
+
+    def test_very_light_maps_to_light_block(self):
+        """Values < 0.10 should render as ░"""
+        from analysis.daily_digest import _format_hourly_sparkline
+        assert _format_hourly_sparkline([0.0])[0] == "░"
+        assert _format_hourly_sparkline([0.05])[0] == "░"
+        assert _format_hourly_sparkline([0.09])[0] == "░"
+
+    def test_light_maps_to_medium_block(self):
+        """Values 0.10–0.24 should render as ▒"""
+        from analysis.daily_digest import _format_hourly_sparkline
+        assert _format_hourly_sparkline([0.10])[0] == "▒"
+        assert _format_hourly_sparkline([0.20])[0] == "▒"
+        assert _format_hourly_sparkline([0.24])[0] == "▒"
+
+    def test_moderate_maps_to_dark_block(self):
+        """Values 0.25–0.49 should render as ▓"""
+        from analysis.daily_digest import _format_hourly_sparkline
+        assert _format_hourly_sparkline([0.25])[0] == "▓"
+        assert _format_hourly_sparkline([0.40])[0] == "▓"
+        assert _format_hourly_sparkline([0.49])[0] == "▓"
+
+    def test_heavy_maps_to_full_block(self):
+        """Values >= 0.50 should render as █"""
+        from analysis.daily_digest import _format_hourly_sparkline
+        assert _format_hourly_sparkline([0.50])[0] == "█"
+        assert _format_hourly_sparkline([0.75])[0] == "█"
+        assert _format_hourly_sparkline([1.0])[0] == "█"
+
+    def test_none_maps_to_dot(self):
+        """None values (missing data) should render as ·"""
+        from analysis.daily_digest import _format_hourly_sparkline
+        result = _format_hourly_sparkline([None])
+        assert result == "·"
+
+    def test_mixed_values_produce_correct_pattern(self):
+        """A known mixed input should produce the expected pattern."""
+        from analysis.daily_digest import _format_hourly_sparkline
+        # ░▒▓█· — each level once plus a None
+        vals = [0.05, 0.15, 0.35, 0.65, None]
+        result = _format_hourly_sparkline(vals)
+        assert result == "░▒▓█·", f"Got: {result!r}"
+
+    def test_empty_input_returns_empty_string(self):
+        """Empty input → empty output."""
+        from analysis.daily_digest import _format_hourly_sparkline
+        assert _format_hourly_sparkline([]) == ""
+
+    def test_output_is_string(self):
+        """Return type must always be str."""
+        from analysis.daily_digest import _format_hourly_sparkline
+        result = _format_hourly_sparkline([0.3, None, 0.8])
+        assert isinstance(result, str)
+
+
+class TestHourlyCLSInDigest:
+    """Integration tests: sparkline appears in compute_digest and format_digest_message."""
+
+    def _make_basic_windows(self) -> list[dict]:
+        """Build 96 minimal windows with varying CLS for testing."""
+        from engine.chunker import build_windows
+        whoop = {
+            "recovery_score": 75.0,
+            "hrv_rmssd_milli": 65.0,
+            "resting_heart_rate": 55.0,
+            "sleep_performance": 80.0,
+            "sleep_hours": 7.5,
+            "strain": 12.0,
+            "spo2_percentage": 95.0,
+        }
+        calendar = {
+            "events": [],
+            "event_count": 0,
+            "total_meeting_minutes": 0,
+            "max_concurrent_attendees": 0,
+        }
+        from unittest.mock import patch
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            return build_windows("2026-03-14", whoop, calendar, {})
+
+    def test_compute_digest_includes_hourly_cls_curve(self):
+        """compute_digest() should include 'hourly_cls_curve' key."""
+        from analysis.daily_digest import compute_digest
+        from unittest.mock import patch
+        windows = self._make_basic_windows()
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            digest = compute_digest(windows)
+        assert "hourly_cls_curve" in digest, "digest must contain 'hourly_cls_curve'"
+
+    def test_hourly_cls_curve_in_digest_has_15_values(self):
+        """The curve in the digest should have exactly 15 values."""
+        from analysis.daily_digest import compute_digest
+        from unittest.mock import patch
+        windows = self._make_basic_windows()
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            digest = compute_digest(windows)
+        curve = digest["hourly_cls_curve"]
+        assert len(curve) == 15, f"Expected 15, got {len(curve)}"
+
+    def test_format_digest_message_contains_sparkline(self):
+        """format_digest_message() output should include the sparkline line."""
+        from analysis.daily_digest import compute_digest, format_digest_message
+        from unittest.mock import patch
+        windows = self._make_basic_windows()
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            digest = compute_digest(windows)
+        message = format_digest_message(digest)
+        # The sparkline line contains '7am' and '10pm' as anchors
+        assert "7am" in message, "Formatted digest should show '7am' in sparkline"
+        assert "10pm" in message, "Formatted digest should show '10pm' in sparkline"
+
+    def test_format_digest_message_sparkline_uses_block_chars(self):
+        """The sparkline line should contain at least one block char."""
+        from analysis.daily_digest import compute_digest, format_digest_message
+        from unittest.mock import patch
+        windows = self._make_basic_windows()
+        with patch("engine.store.get_recent_summaries", return_value=[]):
+            digest = compute_digest(windows)
+        message = format_digest_message(digest)
+        # At least one block character should appear somewhere in the message
+        block_chars = {"░", "▒", "▓", "█", "·"}
+        assert any(c in message for c in block_chars), \
+            "Formatted digest should contain block-chart characters in sparkline"
+
+    def test_no_hourly_cls_curve_in_digest_gracefully_handled(self):
+        """If digest has no hourly_cls_curve key, format_digest_message should not crash."""
+        from analysis.daily_digest import format_digest_message
+        minimal_digest = {
+            "date": "2026-03-14",
+            "whoop": {"recovery_score": 75.0, "hrv_rmssd_milli": 65.0, "sleep_hours": 7.5},
+            "metrics": {"avg_cls": 0.20, "peak_cls": 0.40, "avg_fdi_active": 0.70, "avg_ras": 0.75},
+            "activity": {
+                "working_windows": 60, "active_windows": 10, "idle_windows": 50,
+                "total_meeting_minutes": 60, "meeting_count": 2,
+                "slack_sent": 5, "slack_received": 20,
+            },
+            "peak_window": None,
+            "trend": {},
+            "insight": "Test insight.",
+            # deliberately no "hourly_cls_curve"
+        }
+        # Should not raise
+        result = format_digest_message(minimal_digest)
+        assert isinstance(result, str)
+        assert len(result) > 0
