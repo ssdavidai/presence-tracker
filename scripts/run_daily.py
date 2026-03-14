@@ -6,16 +6,35 @@ Usage:
     python3 scripts/run_daily.py                  # Run for today
     python3 scripts/run_daily.py 2026-03-13       # Run for a specific date
     python3 scripts/run_daily.py --force           # Re-run even if data exists
+    python3 scripts/run_daily.py --no-alerts      # Skip anomaly alert DMs
 
 This script:
 1. Collects WHOOP data for the date
 2. Collects Google Calendar events
 3. Collects Slack activity
-4. Builds 96 × 15-min windows
-5. Computes derived metrics
-6. Writes YYYY-MM-DD.jsonl to data/chunks/
-7. Updates rolling summary stats
-8. Sends a digest to #alfred-logs
+4. Collects RescueTime activity (if API key configured)
+5. Collects Omi transcripts (if available)
+6. Builds 96 × 15-min windows
+7. Computes derived metrics
+8. Writes YYYY-MM-DD.jsonl to data/chunks/
+9. Updates rolling summary stats
+10. Sends a digest DM to David
+11. Generates HTML dashboard
+12. Runs v5 multi-source anomaly alerts (CLS spike, FDI collapse, RAS streak)
+
+v1.7 — Anomaly alerts wired into manual runner:
+  Previously the v5 multi-source anomaly engine (analysis/anomaly_alerts.py)
+  was only called via the Temporal DailyIngestionWorkflow.  When David or Alfred
+  ran `python3 scripts/run_daily.py` directly — for backfills, re-runs, or manual
+  ingestion — the proper CLS spike / FDI collapse / RAS streak checks were
+  completely skipped.  A weak single-condition fallback (recovery < 50 AND
+  CLS > 0.70) from the intuition module was the only guard.
+
+  This release wires send_anomaly_alerts() directly into run_daily.py so that
+  both the Temporal workflow path and the manual-runner path execute identical
+  alert logic.  The old weak fallback is replaced entirely.
+
+  --no-alerts flag added for tests and backfills that should not spam Slack.
 """
 
 import argparse
@@ -64,9 +83,16 @@ def _slack_log(message: str) -> None:
         print(f"[slack-log] Warning: {e}", file=sys.stderr)
 
 
-def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
+def run(date_str: str, force: bool = False, quiet: bool = False, alerts: bool = True) -> dict:
     """
     Run the full daily ingestion pipeline for a given date.
+
+    Args:
+        date_str: Date to process (YYYY-MM-DD).
+        force: Re-run even if data already exists for this date.
+        quiet: Suppress progress output (for cron / backfill).
+        alerts: Run v5 anomaly alerts after ingestion (default True).
+                Set to False for backfills or testing to avoid Slack spam.
 
     Returns the day summary dict.
     Raises on critical failures.
@@ -209,10 +235,26 @@ def run(date_str: str, force: bool = False, quiet: bool = False) -> dict:
     except Exception as e:
         print(f"[presence] Dashboard generation failed (non-fatal): {e}", file=sys.stderr)
 
-    # Daily alert check
-    if recovery is not None and recovery < 50 and avg_cls and avg_cls > 0.70:
-        from analysis.intuition import run_daily_alert
-        run_daily_alert(summary)
+    # ── Step 11: Run v5 multi-source anomaly alerts ───────────────────────
+    # Uses the same engine as DailyIngestionWorkflow in Temporal.
+    # Checks CLS spike (> 2 std devs above baseline), FDI collapse (>30% drop),
+    # and RAS misalignment streak (3 consecutive days below 0.45).
+    # Sends a batched Slack DM to David if any condition fires.
+    # Skipped when alerts=False (backfills, tests, --no-alerts flag).
+    if alerts:
+        try:
+            from analysis.anomaly_alerts import check_anomalies, send_anomaly_alerts
+            anomaly_result = check_anomalies(date_str)
+            triggered = [k for k, v in anomaly_result.get("alerts", {}).items() if v]
+            if triggered:
+                send_anomaly_alerts(date_str)
+                if not quiet:
+                    print(f"[presence] Anomaly alerts fired: {', '.join(triggered)}")
+            else:
+                if not quiet:
+                    print("[presence] Anomaly alerts: no triggers")
+        except Exception as e:
+            print(f"[presence] Anomaly alerts failed (non-fatal): {e}", file=sys.stderr)
 
     if not quiet:
         print(f"[presence] Done. Summary: {json.dumps(summary.get('metrics_avg', {}), indent=2)}")
@@ -228,6 +270,8 @@ def main():
                         help="Re-run even if data already exists")
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="Suppress output (for cron)")
+    parser.add_argument("--no-alerts", action="store_true",
+                        help="Skip anomaly alert DMs (useful for backfills)")
     args = parser.parse_args()
 
     try:
@@ -236,7 +280,7 @@ def main():
         print(f"Invalid date format: {args.date}. Use YYYY-MM-DD.", file=sys.stderr)
         sys.exit(1)
 
-    summary = run(args.date, force=args.force, quiet=args.quiet)
+    summary = run(args.date, force=args.force, quiet=args.quiet, alerts=not args.no_alerts)
     print(json.dumps(summary, indent=2, default=str))
 
 

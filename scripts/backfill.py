@@ -10,6 +10,9 @@ Usage:
 Note: WHOOP data is available for all historical dates.
 Calendar data goes back as far as Google Calendar retains it.
 Slack history depends on your workspace plan.
+
+Anomaly alerts are automatically disabled during backfill runs to avoid
+sending multiple historical alerts to Slack.  Each day runs with alerts=False.
 """
 
 import argparse
@@ -56,7 +59,8 @@ def main():
     for i, date_str in enumerate(dates):
         print(f"[backfill] [{i+1}/{len(dates)}] {date_str}")
         try:
-            run(date_str, force=args.force)
+            # alerts=False: backfilling historical dates must not fire Slack DMs
+            run(date_str, force=args.force, alerts=False)
             success += 1
         except Exception as e:
             print(f"[backfill] FAILED {date_str}: {e}", file=sys.stderr)
