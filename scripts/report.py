@@ -263,18 +263,47 @@ def _meeting_blocks(windows: list[dict]) -> list[dict]:
 
 
 def _omi_stats(windows: list[dict]) -> Optional[dict]:
-    """Extract Omi conversation stats from windows, or None if no data."""
+    """
+    Extract Omi conversation stats from windows, or None if no data.
+
+    v10.1: Now includes topic breakdown (category distribution, dominant topic,
+    mean cognitive density) from the v10.0 Omi topic classifier.  When topic
+    fields are absent (older JSONL or no classifier data), falls back to the
+    v2.0 basic stats silently.
+    """
     omi_windows = [w for w in windows if w.get("omi") and w["omi"].get("conversation_active")]
     if not omi_windows:
         return None
     total_words = sum(w["omi"].get("word_count", 0) for w in omi_windows)
     total_speech_secs = sum(w["omi"].get("speech_seconds", 0.0) for w in omi_windows)
     total_sessions = sum(w["omi"].get("sessions_count", 0) for w in omi_windows)
+
+    # v10.1: topic breakdown from v10.0 topic classifier
+    # category_counts: how many active-conversation windows had each topic category
+    from collections import Counter
+    category_counts: Counter = Counter()
+    density_vals: list[float] = []
+    for w in omi_windows:
+        omi = w.get("omi", {})
+        cat = omi.get("topic_category") or omi.get("category")
+        if cat and cat != "unknown":
+            category_counts[cat] += 1
+        density = omi.get("cognitive_density")
+        if density is not None:
+            density_vals.append(float(density))
+
+    dominant_topic = category_counts.most_common(1)[0][0] if category_counts else None
+    mean_density = round(sum(density_vals) / len(density_vals), 3) if density_vals else None
+
     return {
         "conversation_windows": len(omi_windows),
         "total_sessions": total_sessions,
         "total_words": total_words,
         "total_speech_minutes": round(total_speech_secs / 60.0, 1),
+        # v10.1 topic fields (None when classifier data unavailable)
+        "category_counts": dict(category_counts) if category_counts else None,
+        "dominant_topic": dominant_topic,
+        "mean_cognitive_density": mean_density,
     }
 
 
@@ -667,6 +696,38 @@ def print_full(report: dict, show_windows: bool = False) -> None:
         print(f"  Windows    {omi['conversation_windows']}")
         print(f"  Words      {omi['total_words']:,}")
         print(f"  Speaking   {omi['total_speech_minutes']:.0f} min")
+
+        # v10.1: Topic breakdown (shown when topic classifier data is available)
+        _TOPIC_LABELS = {
+            "work_technical": "Technical",
+            "work_strategic": "Strategic",
+            "personal":        "Personal",
+            "operational":     "Operational",
+            "mixed":           "Mixed",
+        }
+        cats = omi.get("category_counts")
+        dominant = omi.get("dominant_topic")
+        density = omi.get("mean_cognitive_density")
+        if cats or dominant or density is not None:
+            print()
+            if dominant:
+                label = _TOPIC_LABELS.get(dominant, dominant.replace("_", " ").title())
+                print(f"  Topic      {label}", end="")
+                if density is not None:
+                    bar_val = density
+                    print(f"  (density {_bar(bar_val, 8)} {density:.0%})", end="")
+                print()
+            if cats and len(cats) > 1:
+                # Show category breakdown as a mini distribution
+                total_cat = sum(cats.values())
+                cat_order = ["work_technical", "work_strategic", "personal", "operational", "mixed"]
+                for cat in cat_order:
+                    count = cats.get(cat, 0)
+                    if count == 0:
+                        continue
+                    lbl = _TOPIC_LABELS.get(cat, cat)
+                    pct = count / total_cat
+                    print(f"             {lbl:<12}  {_bar(pct, 6)} {count}w")
         print()
 
     # ── RescueTime ────────────────────────────────────────────────────────────
