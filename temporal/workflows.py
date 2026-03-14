@@ -13,6 +13,7 @@ with workflow.unsafe.imports_passed_through():
     from temporal.activities import (
         ingest_day,
         run_weekly_intuition,
+        run_weekly_summary,
         send_morning_readiness_brief,
         notify_slack_presence,
         generate_daily_dashboard,
@@ -148,26 +149,56 @@ class MorningBriefWorkflow:
 @workflow.defn
 class WeeklyAnalysisWorkflow:
     """
-    Weekly Alfred Intuition pattern analysis.
+    Weekly presence analysis.
+
+    Runs two parallel tracks:
+    1. Deterministic weekly summary — week-over-week metric deltas (no LLM)
+    2. Alfred Intuition report — LLM-powered pattern interpretation
+
+    Both are sent as Slack DMs to David.  The summary runs first so David
+    gets the numbers even if the AI report is slow or fails.
 
     Schedule: Sunday 21:00 Budapest time
     """
 
     @workflow.run
-    async def run(self) -> str:
-        workflow.logger.info("Starting weekly intuition analysis")
+    async def run(self, date_str: str = None) -> str:
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
 
-        success = await workflow.execute_activity(
+        workflow.logger.info(f"Starting weekly analysis for week ending {date_str}")
+
+        # ── Step 1: Deterministic weekly summary (fast, no LLM) ──────────
+        summary_ok = await workflow.execute_activity(
+            run_weekly_summary,
+            args=[date_str],
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+
+        # ── Step 2: AI Intuition report (LLM, slower) ────────────────────
+        intuition_ok = await workflow.execute_activity(
             run_weekly_intuition,
             start_to_close_timeout=timedelta(minutes=10),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
-        status = "complete" if success else "failed"
+        status = "complete" if (summary_ok or intuition_ok) else "failed"
+        detail_parts = []
+        if summary_ok:
+            detail_parts.append("summary ✓")
+        else:
+            detail_parts.append("summary ✗")
+        if intuition_ok:
+            detail_parts.append("intuition ✓")
+        else:
+            detail_parts.append("intuition ✗")
+
+        log_msg = f"[PRESENCE] Weekly analysis {status} — {', '.join(detail_parts)}"
         await workflow.execute_activity(
             notify_slack_presence,
-            args=[f"[PRESENCE] Weekly analysis {status}"],
+            args=[log_msg],
             start_to_close_timeout=timedelta(seconds=30),
         )
 
-        return f"Weekly analysis {status}"
+        return f"Weekly analysis {status}: {date_str}"

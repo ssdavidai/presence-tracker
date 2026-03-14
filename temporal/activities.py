@@ -78,6 +78,25 @@ async def run_anomaly_alerts(date_str: str) -> dict:
 
 
 @activity.defn
+async def run_weekly_summary(date_str: str) -> bool:
+    """Send the deterministic weekly presence summary DM to David.
+
+    Runs alongside the AI Intuition report as a lightweight, non-LLM complement.
+    Computes week-over-week metric deltas, best/worst days, and source coverage.
+
+    Returns True if the DM was sent successfully.
+    """
+    from scripts.weekly_summary import send_weekly_summary
+    try:
+        ok = send_weekly_summary(date_str)
+        activity.logger.info(f"Weekly summary DM {'sent' if ok else 'failed'} for {date_str}")
+        return ok
+    except Exception as e:
+        activity.logger.error(f"Weekly summary failed: {e}")
+        return False
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

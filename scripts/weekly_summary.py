@@ -1,0 +1,639 @@
+#!/usr/bin/env python3
+"""
+Presence Tracker — Weekly Summary
+
+Computes a deterministic week-over-week comparison report from stored JSONL data.
+No API calls, no LLM — pure Python analytics over the rolling summary.
+
+This is the lightweight complement to the AI-powered Alfred Intuition report.
+Where Intuition interprets patterns, this script *computes* them: concrete numbers,
+week-vs-week deltas, best/worst days, source coverage, and focus time breakdown.
+
+Runs automatically as part of the weekly analysis pipeline (alongside Intuition),
+or can be triggered manually for any 7-day window.
+
+Usage:
+    python3 scripts/weekly_summary.py                    # Last 7 days
+    python3 scripts/weekly_summary.py --date 2026-03-10  # Week ending on date
+    python3 scripts/weekly_summary.py --dry-run          # Print without sending
+    python3 scripts/weekly_summary.py --json             # Machine-readable output
+
+Output:
+    A Slack DM to David summarising the week's presence metrics vs the prior week.
+
+Architecture:
+    1. Load daily summaries for the current and prior week from rolling.json
+    2. Compute aggregates: mean CLS, FDI, SDI, CSC, RAS + WHOOP stats
+    3. Compute week-over-week deltas (Δ with direction arrows)
+    4. Identify best/worst day by CLS and by FDI
+    5. Compute source coverage (how many days had WHOOP, Omi, RescueTime)
+    6. Format a Slack-ready message
+    7. Send as DM to David
+"""
+
+import argparse
+import json
+import math
+import sys
+import urllib.request
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from config import GATEWAY_URL, GATEWAY_TOKEN, SLACK_DM_CHANNEL
+from engine.store import read_summary, list_available_dates, read_day
+
+
+# ─── Aggregation helpers ──────────────────────────────────────────────────────
+
+def _mean(vals: list) -> Optional[float]:
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 3) if vals else None
+
+
+def _delta(this_week: Optional[float], last_week: Optional[float]) -> Optional[float]:
+    """Signed delta: this_week - last_week."""
+    if this_week is None or last_week is None:
+        return None
+    return round(this_week - last_week, 3)
+
+
+def _arrow(delta: Optional[float], good_direction: str = "up") -> str:
+    """
+    Return an arrow emoji for a delta value.
+
+    good_direction:
+        "up"   — higher is better (FDI, RAS, recovery)
+        "down" — lower is better (CLS, SDI, CSC)
+    """
+    if delta is None or abs(delta) < 0.01:
+        return "→"
+    if good_direction == "up":
+        return "↑" if delta > 0 else "↓"
+    else:  # "down"
+        return "↑" if delta < 0 else "↓"
+
+
+def _pct_change(delta: Optional[float], base: Optional[float]) -> Optional[float]:
+    """Percentage change from base."""
+    if delta is None or base is None or base == 0:
+        return None
+    return round(100.0 * delta / abs(base), 1)
+
+
+# ─── Week data loading ────────────────────────────────────────────────────────
+
+def _week_dates(end_date_str: str) -> list[str]:
+    """Return 7 date strings ending on end_date (inclusive), oldest first."""
+    end = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+    return [(end - timedelta(days=6 - i)).strftime("%Y-%m-%d") for i in range(7)]
+
+
+def load_week_data(end_date_str: str) -> dict:
+    """
+    Load and aggregate daily summaries for the 7-day window ending on end_date.
+
+    Returns a structured dict with:
+    - dates: list of date strings in the window
+    - days_with_data: count of days that have JSONL data
+    - metrics: averaged metrics across the week
+    - whoop: averaged WHOOP signals
+    - source_coverage: {source: days_present}
+    - best_day: {cls|fdi: date_str, value}
+    - worst_day: {cls|fdi: date_str, value}
+    - focus_peak_hours: most common peak focus hour
+    - omi_stats: Omi aggregate for the week (conversation windows, word counts)
+    - rt_stats: RescueTime aggregate (focus minutes, productive pct)
+    - calendar_stats: total meeting minutes
+    - slack_stats: total messages
+    - raw_days: list of per-day dicts for detailed rendering
+    """
+    dates = _week_dates(end_date_str)
+    rolling = read_summary()
+    all_day_data = rolling.get("days", {})
+
+    # Build per-day stats list, only for days with data
+    day_records = []
+    for d in dates:
+        if d in all_day_data:
+            day_records.append({"date": d, **all_day_data[d]})
+
+    if not day_records:
+        return {"dates": dates, "days_with_data": 0, "metrics": None}
+
+    # ── Metric averages ───────────────────────────────────────────────────────
+    def _avg_metric(key: str) -> Optional[float]:
+        vals = [r.get("metrics_avg", {}).get(key) for r in day_records]
+        return _mean(vals)
+
+    metrics = {
+        "cls": _avg_metric("cognitive_load_score"),
+        "fdi": _avg_metric("focus_depth_index"),
+        "sdi": _avg_metric("social_drain_index"),
+        "csc": _avg_metric("context_switch_cost"),
+        "ras": _avg_metric("recovery_alignment_score"),
+        "active_fdi": _mean([r.get("focus_quality", {}).get("active_fdi") for r in day_records]),
+    }
+
+    # ── WHOOP averages ────────────────────────────────────────────────────────
+    def _avg_whoop(key: str) -> Optional[float]:
+        vals = [r.get("whoop", {}).get(key) for r in day_records]
+        return _mean(vals)
+
+    whoop = {
+        "recovery": _avg_whoop("recovery_score"),
+        "hrv": _avg_whoop("hrv_rmssd_milli"),
+        "sleep_hours": _avg_whoop("sleep_hours"),
+        "sleep_performance": _avg_whoop("sleep_performance"),
+    }
+
+    # ── Best / worst days ─────────────────────────────────────────────────────
+    def _extremes(key: str, metric_section: str = "metrics_avg") -> dict:
+        pairs = [
+            (r["date"], r.get(metric_section, {}).get(key))
+            for r in day_records
+            if r.get(metric_section, {}).get(key) is not None
+        ]
+        if not pairs:
+            return {"best": None, "worst": None}
+        best_date, best_val = max(pairs, key=lambda x: x[1])
+        worst_date, worst_val = min(pairs, key=lambda x: x[1])
+        return {
+            "best": {"date": best_date, "value": round(best_val, 3)},
+            "worst": {"date": worst_date, "value": round(worst_val, 3)},
+        }
+
+    cls_extremes = _extremes("cognitive_load_score")
+    fdi_extremes = _extremes("active_fdi", metric_section="focus_quality")
+
+    # ── Peak focus hours ─────────────────────────────────────────────────────
+    peak_hours = [
+        r.get("focus_quality", {}).get("peak_focus_hour")
+        for r in day_records
+        if r.get("focus_quality", {}).get("peak_focus_hour") is not None
+    ]
+    # Mode: most common peak focus hour across the week
+    if peak_hours:
+        from collections import Counter
+        peak_focus_hour_mode = Counter(peak_hours).most_common(1)[0][0]
+    else:
+        peak_focus_hour_mode = None
+
+    # ── Source coverage ───────────────────────────────────────────────────────
+    # Count days where each source was present (any window with that source)
+    source_days: dict[str, int] = {"whoop": 0, "calendar": 0, "slack": 0, "omi": 0, "rescuetime": 0}
+    for r in day_records:
+        if r.get("whoop", {}).get("recovery_score") is not None:
+            source_days["whoop"] += 1
+        # Calendar and Slack always collected
+        source_days["calendar"] += 1
+        source_days["slack"] += 1
+        if r.get("rescuetime") is not None:
+            source_days["rescuetime"] += 1
+
+    # Omi coverage: requires reading the JSONL files directly (not in rolling summary yet)
+    omi_total_words = 0
+    omi_total_conversation_windows = 0
+    omi_total_sessions = 0
+    omi_days = 0
+    for r in day_records:
+        # Read actual JSONL to get Omi aggregate
+        windows = read_day(r["date"])
+        omi_windows = [w for w in windows if w.get("omi") and w["omi"].get("conversation_active")]
+        if omi_windows:
+            omi_days += 1
+            source_days["omi"] += 1
+            omi_total_conversation_windows += len(omi_windows)
+            omi_total_words += sum(w["omi"].get("word_count", 0) for w in omi_windows)
+            omi_total_sessions += sum(w["omi"].get("sessions_count", 0) for w in omi_windows)
+
+    omi_stats = {
+        "days_active": omi_days,
+        "total_conversation_windows": omi_total_conversation_windows,
+        "total_words": omi_total_words,
+        "total_sessions": omi_total_sessions,
+        "avg_words_per_day": round(omi_total_words / omi_days, 0) if omi_days > 0 else 0,
+    }
+
+    # ── RescueTime aggregate ──────────────────────────────────────────────────
+    rt_days = [r for r in day_records if r.get("rescuetime") is not None]
+    if rt_days:
+        rt_focus_mins = sum(r["rescuetime"].get("focus_minutes", 0) for r in rt_days)
+        rt_distraction_mins = sum(r["rescuetime"].get("distraction_minutes", 0) for r in rt_days)
+        rt_active_mins = sum(r["rescuetime"].get("active_minutes", 0) for r in rt_days)
+        rt_productive_pcts = [r["rescuetime"].get("productive_pct") for r in rt_days if r["rescuetime"].get("productive_pct") is not None]
+        rt_stats = {
+            "days_tracked": len(rt_days),
+            "total_focus_minutes": round(rt_focus_mins, 0),
+            "total_distraction_minutes": round(rt_distraction_mins, 0),
+            "avg_productive_pct": _mean(rt_productive_pcts),
+        }
+    else:
+        rt_stats = {"days_tracked": 0}
+
+    # ── Calendar aggregate ────────────────────────────────────────────────────
+    total_meeting_mins = sum(
+        r.get("calendar", {}).get("total_meeting_minutes", 0)
+        for r in day_records
+    )
+    calendar_stats = {"total_meeting_minutes": total_meeting_mins}
+
+    # ── Slack aggregate ───────────────────────────────────────────────────────
+    total_sent = sum(r.get("slack", {}).get("total_messages_sent", 0) for r in day_records)
+    total_received = sum(r.get("slack", {}).get("total_messages_received", 0) for r in day_records)
+    slack_stats = {"total_sent": total_sent, "total_received": total_received}
+
+    return {
+        "dates": dates,
+        "days_with_data": len(day_records),
+        "metrics": metrics,
+        "whoop": whoop,
+        "cls_extremes": cls_extremes,
+        "fdi_extremes": fdi_extremes,
+        "peak_focus_hour": peak_focus_hour_mode,
+        "source_coverage": source_days,
+        "omi_stats": omi_stats,
+        "rt_stats": rt_stats,
+        "calendar_stats": calendar_stats,
+        "slack_stats": slack_stats,
+        "raw_days": day_records,
+    }
+
+
+# ─── Report computation ───────────────────────────────────────────────────────
+
+def compute_weekly_summary(end_date_str: str) -> dict:
+    """
+    Compute the full weekly summary with week-over-week comparison.
+
+    Args:
+        end_date_str: The last day of the current week (YYYY-MM-DD).
+
+    Returns:
+        Dict with this_week, last_week, deltas, and formatted sections.
+    """
+    # Determine prior week end date (7 days before this week's end)
+    end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+    prior_end = (end_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    this_week = load_week_data(end_date_str)
+    last_week = load_week_data(prior_end)
+
+    # ── Week-over-week metric deltas ──────────────────────────────────────────
+    deltas: dict[str, Optional[float]] = {}
+    if this_week.get("metrics") and last_week.get("metrics"):
+        tw_m = this_week["metrics"]
+        lw_m = last_week["metrics"]
+        for k in ["cls", "fdi", "active_fdi", "sdi", "csc", "ras"]:
+            deltas[k] = _delta(tw_m.get(k), lw_m.get(k))
+
+    # ── WHOOP deltas ──────────────────────────────────────────────────────────
+    whoop_deltas: dict[str, Optional[float]] = {}
+    if this_week.get("whoop") and last_week.get("whoop"):
+        tw_w = this_week["whoop"]
+        lw_w = last_week["whoop"]
+        for k in ["recovery", "hrv", "sleep_hours", "sleep_performance"]:
+            whoop_deltas[k] = _delta(tw_w.get(k), lw_w.get(k))
+
+    return {
+        "end_date": end_date_str,
+        "this_week": this_week,
+        "last_week": last_week,
+        "deltas": deltas,
+        "whoop_deltas": whoop_deltas,
+    }
+
+
+# ─── Message formatter ────────────────────────────────────────────────────────
+
+def _fmt_val(val: Optional[float], scale: float = 100.0, suffix: str = "%", decimals: int = 0) -> str:
+    """Format a 0-1 metric as percentage or other scaled value."""
+    if val is None:
+        return "—"
+    scaled = val * scale
+    if decimals == 0:
+        return f"{round(scaled)}{suffix}"
+    return f"{scaled:.{decimals}f}{suffix}"
+
+
+def _fmt_delta(delta: Optional[float], scale: float = 100.0, good_direction: str = "up") -> str:
+    """Format a delta value with direction arrow and sign."""
+    if delta is None or abs(delta * scale) < 1.0:
+        return ""
+    arrow = _arrow(delta, good_direction=good_direction)
+    scaled = abs(delta * scale)
+    sign = "+" if delta > 0 else "−"
+    if scaled >= 1.0:
+        return f" {arrow} {sign}{round(scaled)}%"
+    return f" {arrow} {sign}{scaled:.1f}%"
+
+
+def _fmt_ms(val: Optional[float]) -> str:
+    if val is None:
+        return "—"
+    return f"{round(val)}ms"
+
+
+def _fmt_ms_delta(delta: Optional[float]) -> str:
+    if delta is None or abs(delta) < 1.0:
+        return ""
+    arrow = _arrow(delta, good_direction="up")
+    sign = "+" if delta > 0 else "−"
+    return f" {arrow} {sign}{abs(round(delta))}ms"
+
+
+def _day_label(date_str: Optional[str]) -> str:
+    if not date_str:
+        return "—"
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.strftime("%a %-d")  # e.g. "Mon 10"
+    except Exception:
+        return date_str
+
+
+def _hour_label(hour: Optional[int]) -> str:
+    if hour is None:
+        return "—"
+    suffix = "am" if hour < 12 else "pm"
+    h12 = hour if hour <= 12 else hour - 12
+    if h12 == 0:
+        h12 = 12
+    return f"{h12}{suffix}"
+
+
+def format_weekly_message(summary: dict) -> str:
+    """Format the weekly summary as a Slack-ready DM message."""
+    tw = summary.get("this_week", {})
+    lw = summary.get("last_week", {})
+    deltas = summary.get("deltas", {})
+    whoop_deltas = summary.get("whoop_deltas", {})
+    end_date = summary.get("end_date", "")
+
+    # Header
+    try:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        start_dt = end_dt - timedelta(days=6)
+        week_label = f"{start_dt.strftime('%b %-d')}–{end_dt.strftime('%b %-d')}"
+    except Exception:
+        week_label = end_date
+
+    tw_n = tw.get("days_with_data", 0)
+    lines = [
+        f"*📊 Weekly Presence Summary — {week_label}*",
+        f"_{tw_n} day{'s' if tw_n != 1 else ''} tracked_",
+        "",
+    ]
+
+    # No data guard
+    tw_m = tw.get("metrics")
+    if not tw_m:
+        lines.append("No presence data for this week.")
+        return "\n".join(lines)
+
+    # ── Core metrics ──────────────────────────────────────────────────────────
+    lines.append("*Core Metrics (working hours avg)*")
+
+    cls_val = _fmt_val(tw_m.get("cls"), scale=100, suffix="%")
+    cls_d = _fmt_delta(deltas.get("cls"), scale=100, good_direction="down")
+    lines.append(f"• CLS (Cognitive Load):  {cls_val}{cls_d}")
+
+    # Use active_fdi as the accurate focus signal; fall back to fdi
+    fdi_src = tw_m.get("active_fdi") or tw_m.get("fdi")
+    fdi_delta_src = deltas.get("active_fdi") or deltas.get("fdi")
+    fdi_val = _fmt_val(fdi_src, scale=100, suffix="%")
+    fdi_d = _fmt_delta(fdi_delta_src, scale=100, good_direction="up")
+    lines.append(f"• FDI (Focus Depth):     {fdi_val}{fdi_d}")
+
+    sdi_val = _fmt_val(tw_m.get("sdi"), scale=100, suffix="%")
+    sdi_d = _fmt_delta(deltas.get("sdi"), scale=100, good_direction="down")
+    lines.append(f"• SDI (Social Drain):    {sdi_val}{sdi_d}")
+
+    ras_val = _fmt_val(tw_m.get("ras"), scale=100, suffix="%")
+    ras_d = _fmt_delta(deltas.get("ras"), scale=100, good_direction="up")
+    lines.append(f"• RAS (Recovery Align):  {ras_val}{ras_d}")
+
+    # ── WHOOP ─────────────────────────────────────────────────────────────────
+    tw_w = tw.get("whoop", {})
+    if tw_w.get("recovery") is not None:
+        lines.append("")
+        lines.append("*WHOOP (weekly avg)*")
+
+        rec_val = tw_w.get("recovery")
+        rec_d = whoop_deltas.get("recovery")
+        rec_arrow = _arrow(rec_d, good_direction="up") if rec_d and abs(rec_d) >= 1 else "→"
+        rec_sign = f" {rec_arrow} {'+' if rec_d and rec_d > 0 else '−'}{abs(round(rec_d or 0))}%" if rec_d and abs(rec_d) >= 1 else ""
+        lines.append(f"• Recovery:   {round(rec_val or 0)}%{rec_sign}")
+
+        hrv_d = whoop_deltas.get("hrv")
+        lines.append(f"• HRV:        {_fmt_ms(tw_w.get('hrv'))}{_fmt_ms_delta(hrv_d)}")
+
+        sleep_h = tw_w.get("sleep_hours")
+        if sleep_h is not None:
+            sleep_d = whoop_deltas.get("sleep_hours")
+            sleep_arrow = ""
+            if sleep_d is not None and abs(sleep_d) >= 0.1:
+                arrow_s = "↑" if sleep_d > 0 else "↓"
+                sign_s = "+" if sleep_d > 0 else "−"
+                sleep_arrow = f" {arrow_s} {sign_s}{abs(sleep_d):.1f}h"
+            lines.append(f"• Sleep:      {sleep_h:.1f}h{sleep_arrow}")
+
+    # ── Best / worst days ─────────────────────────────────────────────────────
+    cls_ext = tw.get("cls_extremes", {})
+    fdi_ext = tw.get("fdi_extremes", {})
+    has_extremes = cls_ext.get("best") or fdi_ext.get("best")
+    if has_extremes:
+        lines.append("")
+        lines.append("*Best & Worst Days*")
+
+        if cls_ext.get("worst") and cls_ext.get("best"):
+            worst_cls = cls_ext["worst"]
+            best_cls_by_low = cls_ext["worst"]  # lowest CLS = lightest day
+            lightest = cls_ext["worst"]
+            heaviest = cls_ext["best"]
+            lines.append(
+                f"• Heaviest day (CLS): {_day_label(heaviest['date'])} "
+                f"({round(heaviest['value'] * 100)}%)"
+            )
+            lines.append(
+                f"• Lightest day (CLS): {_day_label(lightest['date'])} "
+                f"({round(lightest['value'] * 100)}%)"
+            )
+
+        if fdi_ext.get("best"):
+            best_fdi = fdi_ext["best"]
+            lines.append(
+                f"• Best focus day (FDI): {_day_label(best_fdi['date'])} "
+                f"({round(best_fdi['value'] * 100)}%)"
+            )
+
+    # ── Focus peak ────────────────────────────────────────────────────────────
+    peak_hour = tw.get("peak_focus_hour")
+    if peak_hour is not None:
+        lines.append(f"• Peak focus window: {_hour_label(peak_hour)}")
+
+    # ── Meetings ──────────────────────────────────────────────────────────────
+    cal = tw.get("calendar_stats", {})
+    total_meeting_mins = cal.get("total_meeting_minutes", 0)
+    if total_meeting_mins > 0:
+        meeting_hours = total_meeting_mins / 60
+        lines.append("")
+        lines.append("*Time Breakdown*")
+        lines.append(f"• Meetings:    {meeting_hours:.1f}h ({total_meeting_mins} min)")
+
+    # ── Omi stats ─────────────────────────────────────────────────────────────
+    omi = tw.get("omi_stats", {})
+    if omi.get("days_active", 0) > 0:
+        omi_days = omi["days_active"]
+        omi_words = omi["total_words"]
+        omi_sessions = omi["total_sessions"]
+        omi_line = f"• Conversations: {omi_sessions} sessions across {omi_days}d"
+        if omi_words > 0:
+            omi_line += f" ({omi_words:,} words)"
+        lines.append(omi_line)
+
+    # ── RescueTime ────────────────────────────────────────────────────────────
+    rt = tw.get("rt_stats", {})
+    if rt.get("days_tracked", 0) > 0:
+        focus_h = (rt.get("total_focus_minutes") or 0) / 60
+        productive_pct = rt.get("avg_productive_pct")
+        rt_line = f"• Deep work: {focus_h:.1f}h focused"
+        if productive_pct is not None:
+            rt_line += f" ({round(productive_pct)}% productive)"
+        lines.append(rt_line)
+
+    # ── Slack totals ──────────────────────────────────────────────────────────
+    slack = tw.get("slack_stats", {})
+    total_msgs = slack.get("total_sent", 0) + slack.get("total_received", 0)
+    if total_msgs > 0:
+        lines.append(f"• Slack:       {slack.get('total_sent', 0)} sent / {slack.get('total_received', 0)} received")
+
+    # ── Week-over-week comparison headline ────────────────────────────────────
+    lw_n = lw.get("days_with_data", 0)
+    if lw_n > 0 and deltas:
+        lines.append("")
+        lines.append("*vs Prior Week*")
+        trend_parts = []
+
+        cls_d = deltas.get("cls")
+        if cls_d is not None and abs(cls_d) >= 0.02:
+            direction = "lighter" if cls_d < 0 else "heavier"
+            trend_parts.append(f"CLS {abs(round(cls_d * 100))}% {direction}")
+
+        fdi_d = deltas.get("active_fdi") or deltas.get("fdi")
+        if fdi_d is not None and abs(fdi_d) >= 0.02:
+            direction = "sharper" if fdi_d > 0 else "more fragmented"
+            trend_parts.append(f"focus {direction}")
+
+        rec_d = whoop_deltas.get("recovery")
+        if rec_d is not None and abs(rec_d) >= 2:
+            direction = "better" if rec_d > 0 else "lower"
+            trend_parts.append(f"recovery {abs(round(rec_d))}% {direction}")
+
+        hrv_d = whoop_deltas.get("hrv")
+        if hrv_d is not None and abs(hrv_d) >= 3:
+            direction = "improved" if hrv_d > 0 else "dipped"
+            trend_parts.append(f"HRV {_fmt_ms(abs(hrv_d))} {direction}")
+
+        if trend_parts:
+            lines.append("  " + " · ".join(trend_parts))
+        else:
+            lines.append("  Stable week — no significant changes vs last week")
+
+    lines.append("")
+    lines.append("_Presence Tracker · weekly summary_")
+
+    return "\n".join(lines)
+
+
+# ─── Send DM ──────────────────────────────────────────────────────────────────
+
+def send_weekly_summary(end_date_str: str) -> bool:
+    """Compute and send the weekly summary DM to David."""
+    summary = compute_weekly_summary(end_date_str)
+    message = format_weekly_message(summary)
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {GATEWAY_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = json.dumps({
+            "tool": "message",
+            "args": {
+                "action": "send",
+                "channel": "slack",
+                "target": SLACK_DM_CHANNEL,
+                "message": message,
+            }
+        }).encode()
+        req = urllib.request.Request(
+            f"{GATEWAY_URL}/tools/invoke",
+            data=payload,
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read())
+            return result.get("ok", False)
+    except Exception as e:
+        print(f"[weekly-summary] Failed to send DM: {e}", file=sys.stderr)
+        return False
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Presence Tracker — Weekly Summary",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--date",
+        default=datetime.now().strftime("%Y-%m-%d"),
+        help="End date of the week to summarise (YYYY-MM-DD, default: today)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the message without sending",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_out",
+        help="Output raw summary as JSON instead of formatted message",
+    )
+    args = parser.parse_args()
+
+    try:
+        datetime.strptime(args.date, "%Y-%m-%d")
+    except ValueError:
+        print(f"Invalid date format: {args.date}. Use YYYY-MM-DD.", file=sys.stderr)
+        sys.exit(1)
+
+    summary = compute_weekly_summary(args.date)
+
+    if args.json_out:
+        print(json.dumps(summary, indent=2, default=str))
+        return
+
+    message = format_weekly_message(summary)
+
+    print("=" * 60)
+    print(message)
+    print("=" * 60)
+
+    if not args.dry_run:
+        ok = send_weekly_summary(args.date)
+        print(f"\n{'✓ Sent' if ok else '✗ Failed to send'} to David's DM")
+    else:
+        print("\n[dry-run] Not sent.")
+
+
+if __name__ == "__main__":
+    main()
