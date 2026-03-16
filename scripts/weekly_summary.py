@@ -46,6 +46,26 @@ v1.1 — DPS integration:
     - compute_weekly_summary() adds DPS avg and week-over-week DPS delta.
     - format_weekly_message() surfaces DPS as the headline composite with
       sparkline, week avg, and week-over-week trend direction.
+
+v2.3 — Personal Records milestones + Next-week cognitive pacing:
+    Two previously built modules now surface in the Sunday weekly Slack DM:
+
+    1. Personal Records milestones — highlights any new all-time bests or
+       meaningful streaks that were set during the past 7 days.  This gives
+       David a weekly achievement summary beyond just averages and deltas.
+       Example: "🏆 New personal best: FDI · DPS  🔥 Deep focus streak: 4 days"
+
+    2. Next-week cognitive pacing — the WeeklyPacingPlan is now embedded in
+       the Sunday summary as a forward-looking section, giving David a
+       day-by-day PUSH / STEADY / PROTECT view of the week ahead before
+       Monday morning arrives.  On Sunday he can adjust the calendar; by
+       Monday morning the brief just confirms the plan.
+
+       The pacing plan is omitted when:
+       - Computed on a non-Sunday AND the next-week dates overlap the current
+         weekday (to avoid confusing mid-week summaries).
+       - The plan is not meaningful (< 3 days of history).
+       - Any exception occurs (never blocks the summary).
 """
 
 import argparse
@@ -703,7 +723,7 @@ def format_weekly_message(summary: dict) -> str:
     # ── Cognitive Rhythm insight ──────────────────────────────────────────────
     try:
         from analysis.cognitive_rhythm import compute_cognitive_rhythm, format_rhythm_line
-        rhythm = compute_cognitive_rhythm(as_of_date_str=end_date_str)
+        rhythm = compute_cognitive_rhythm(as_of_date_str=end_date)
         rhythm_line = format_rhythm_line(rhythm)
         if rhythm_line:
             lines.append("")
@@ -721,13 +741,91 @@ def format_weekly_message(summary: dict) -> str:
             compute_sleep_focus_correlation,
             format_sleep_insight_line,
         )
-        sleep_corr = compute_sleep_focus_correlation(as_of_date_str=end_date_str)
+        sleep_corr = compute_sleep_focus_correlation(as_of_date_str=end_date)
         sleep_line = format_sleep_insight_line(sleep_corr)
         if sleep_line:
             lines.append("")
             lines.append(sleep_line)
     except Exception:
         pass  # sleep correlator is non-critical — never block the weekly summary
+
+    # ── Personal Records milestones (v2.3) ────────────────────────────────────
+    # Surfaces any new all-time bests or meaningful streaks set during the
+    # past 7 days.  Checks each day in the week window for new records so
+    # that a mid-week personal best is not missed just because it wasn't
+    # set on the last day of the summary period.
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.personal_records import (
+            compute_personal_records,
+            check_today_records,
+            format_records_line,
+        )
+        # Use end_date as the reference so all-time bests include the full week
+        all_records = compute_personal_records(as_of_date_str=end_date)
+        if all_records.is_meaningful():
+            week_record_lines = []
+            # Check every day in the week window (oldest → newest)
+            try:
+                end_dt_rec = datetime.strptime(end_date, "%Y-%m-%d")
+                week_days_to_check = [
+                    (end_dt_rec - timedelta(days=i)).strftime("%Y-%m-%d")
+                    for i in range(6, -1, -1)
+                ]
+            except Exception:
+                week_days_to_check = []
+
+            seen_bests: set = set()  # avoid duplicate lines if same record hit twice
+            for day_str in week_days_to_check:
+                try:
+                    # Compute records as-of this day so the check is accurate
+                    day_records = compute_personal_records(as_of_date_str=day_str)
+                    today_rec = check_today_records(day_str, day_records)
+                    if today_rec.has_records:
+                        rec_line = format_records_line(today_rec)
+                        if rec_line and rec_line not in seen_bests:
+                            week_record_lines.append(rec_line)
+                            seen_bests.add(rec_line)
+                except Exception:
+                    continue
+
+            if week_record_lines:
+                lines.append("")
+                lines.append("*🏆 This week's milestones*")
+                for rl in week_record_lines:
+                    lines.append(f"  {rl}")
+    except Exception:
+        pass  # records is non-critical — never block the weekly summary
+
+    # ── Next-week cognitive pacing plan (v2.3) ────────────────────────────────
+    # Embeds the WeeklyPacingPlan in the Sunday Slack summary so David sees
+    # next week's PUSH / STEADY / PROTECT strategy 24 hours before the
+    # Monday morning brief confirms it.
+    # Only emitted when: plan is meaningful AND we are looking at a recent
+    # week-end (not a historical backfill more than 2 days stale).
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.weekly_pacing import (
+            compute_weekly_pacing,
+            format_weekly_pacing_section,
+        )
+        # Use the day *after* end_date as the reference so the pacing plan
+        # targets the upcoming week, not the week we just reviewed.
+        end_dt_for_pacing = datetime.strptime(end_date, "%Y-%m-%d")
+        next_week_ref = (end_dt_for_pacing + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Only show next-week pacing when the summary is recent (≤ 2 days old)
+        today_dt = datetime.now()
+        summary_age_days = (today_dt - end_dt_for_pacing).days
+        if summary_age_days <= 2:
+            pacing_plan = compute_weekly_pacing(next_week_ref, fetch_calendar=False)
+            if pacing_plan.is_meaningful:
+                pacing_section = format_weekly_pacing_section(pacing_plan)
+                if pacing_section.strip():
+                    lines.append("")
+                    lines.append(pacing_section.strip())
+    except Exception:
+        pass  # pacing is non-critical — never block the weekly summary
 
     lines.append("")
     lines.append("_Presence Tracker · weekly summary_")

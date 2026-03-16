@@ -938,3 +938,233 @@ class TestFormatWeeklyMessageDps:
 
         # Message should still render without crashing
         assert "Weekly Presence Summary" in message
+
+
+# ─── v2.3: Personal Records + Next-week Pacing ────────────────────────────────
+
+class TestWeeklyPersonalRecordsMilestones:
+    """
+    The weekly summary should surface Personal Records milestones (new all-time
+    bests, meaningful streaks) that were set during the 7-day window.
+
+    These tests mock the personal_records module to control which records are
+    returned and verify that format_weekly_message() includes (or omits) the
+    milestones section correctly.
+    """
+
+    def _make_rolling(self, dates):
+        """Minimal rolling summary with the given dates having data."""
+        return {
+            "days": {d: _make_day_summary(d) for d in dates},
+        }
+
+    def test_milestones_section_present_when_new_best_set(self):
+        """
+        When a new personal best was set this week, the message should include
+        a milestones section with 🏆.
+        """
+        dates = ["2026-03-12", "2026-03-13", "2026-03-14"]
+        rolling = self._make_rolling(dates)
+
+        # Mock personal_records: FDI personal best set on 2026-03-14
+        mock_records_obj = MagicMock()
+        mock_records_obj.is_meaningful.return_value = True
+        mock_records_obj.best_fdi_day = MagicMock()
+        mock_records_obj.best_fdi_day.date_str = "2026-03-14"
+        mock_records_obj.best_cls_day = None
+        mock_records_obj.best_ras_day = None
+        mock_records_obj.best_dps_day = None
+        mock_records_obj.best_recovery_day = None
+        mock_records_obj.best_hrv_day = None
+        mock_records_obj.low_load_streak = None
+        mock_records_obj.deep_focus_streak = None
+        mock_records_obj.recovery_aligned_streak = None
+        mock_records_obj.green_recovery_streak = None
+
+        from analysis.personal_records import TodayRecordSummary
+        today_rec = TodayRecordSummary(
+            date_str="2026-03-14",
+            has_records=True,
+            new_best_fdi=True,
+        )
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.personal_records.compute_personal_records",
+                   return_value=mock_records_obj), \
+             patch("analysis.personal_records.check_today_records",
+                   return_value=today_rec):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        assert "milestones" in message.lower() or "🏆" in message
+
+    def test_milestones_section_absent_when_no_records(self):
+        """
+        When no personal records were set this week, the milestones section
+        should be silently omitted from the message.
+        """
+        dates = ["2026-03-14"]
+        rolling = self._make_rolling(dates)
+
+        mock_records_obj = MagicMock()
+        mock_records_obj.is_meaningful.return_value = True
+        mock_records_obj.best_fdi_day = MagicMock()
+        mock_records_obj.best_fdi_day.date_str = "2026-02-01"  # older date, not this week
+        mock_records_obj.best_cls_day = None
+        mock_records_obj.best_ras_day = None
+        mock_records_obj.best_dps_day = None
+        mock_records_obj.best_recovery_day = None
+        mock_records_obj.best_hrv_day = None
+        mock_records_obj.low_load_streak = None
+        mock_records_obj.deep_focus_streak = None
+        mock_records_obj.recovery_aligned_streak = None
+        mock_records_obj.green_recovery_streak = None
+
+        from analysis.personal_records import TodayRecordSummary
+        no_rec = TodayRecordSummary(date_str="2026-03-14", has_records=False)
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.personal_records.compute_personal_records",
+                   return_value=mock_records_obj), \
+             patch("analysis.personal_records.check_today_records",
+                   return_value=no_rec):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        assert "This week's milestones" not in message
+
+    def test_message_renders_without_crash_when_personal_records_raises(self):
+        """
+        If personal_records raises an exception, the weekly summary should
+        still render cleanly — the milestones block degrades silently.
+        """
+        dates = ["2026-03-14"]
+        rolling = self._make_rolling(dates)
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.personal_records.compute_personal_records",
+                   side_effect=RuntimeError("records unavailable")):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        # Message must render — the exception is swallowed silently
+        assert "Weekly Presence Summary" in message
+        assert "This week's milestones" not in message
+
+
+class TestWeeklyNextWeekPacing:
+    """
+    The weekly summary embeds the next-week WeeklyPacingPlan when:
+      - The plan is meaningful (is_meaningful=True)
+      - The summary is recent (≤ 2 days old)
+
+    These tests mock the weekly_pacing module and verify correct embedding.
+    """
+
+    def _make_rolling(self, dates):
+        return {"days": {d: _make_day_summary(d) for d in dates}}
+
+    def _make_meaningful_plan(self):
+        """Minimal mock WeeklyPacingPlan that is_meaningful=True."""
+        plan = MagicMock()
+        plan.is_meaningful = True
+        plan.strategy = "PUSH"
+        plan.strategy_headline = "Strong week ahead — go deep."
+        plan.week_start = "2026-03-16"
+        plan.week_end = "2026-03-20"
+        plan.weekly_load_forecast = 0.12
+        plan.push_days = ["2026-03-16", "2026-03-17"]
+        plan.protect_days = []
+        plan.cdi_context = "balanced"
+        plan.cdi_score = 52.0
+        plan.days_of_history = 5
+        plan.days = []
+        return plan
+
+    def test_pacing_section_present_for_recent_summary(self):
+        """
+        For a recent summary (end_date = today − 0 days), the pacing plan
+        section should appear in the message when the plan is meaningful.
+        """
+        from datetime import datetime
+        today = datetime.now()
+        end_date = today.strftime("%Y-%m-%d")
+        dates = [end_date]
+        rolling = self._make_rolling(dates)
+
+        plan = self._make_meaningful_plan()
+        pacing_section_text = "📅 *Weekly Pacing — Mon 16 Mar → Fri 20 Mar*\n\nStrong week ahead."
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.weekly_pacing.compute_weekly_pacing", return_value=plan), \
+             patch("analysis.weekly_pacing.format_weekly_pacing_section",
+                   return_value=pacing_section_text):
+            summary = compute_weekly_summary(end_date)
+            message = format_weekly_message(summary)
+
+        # The pacing section text should appear in the message
+        assert "Weekly Pacing" in message or "Strong week ahead" in message
+
+    def test_pacing_section_absent_for_stale_summary(self):
+        """
+        For a stale summary (end_date > 2 days ago), the pacing plan should
+        be omitted — it would show a past week's plan, not next week's.
+        """
+        # end_date = 10 days ago → stale
+        stale_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+        rolling = self._make_rolling([stale_date])
+
+        plan = self._make_meaningful_plan()
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.weekly_pacing.compute_weekly_pacing", return_value=plan):
+            summary = compute_weekly_summary(stale_date)
+            message = format_weekly_message(summary)
+
+        assert "Weekly Pacing" not in message
+
+    def test_pacing_section_absent_when_not_meaningful(self):
+        """
+        When the WeeklyPacingPlan is not meaningful (insufficient history),
+        the section should be silently omitted.
+        """
+        from datetime import datetime
+        today = datetime.now()
+        end_date = today.strftime("%Y-%m-%d")
+        rolling = self._make_rolling([end_date])
+
+        plan = MagicMock()
+        plan.is_meaningful = False  # ← not meaningful
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.weekly_pacing.compute_weekly_pacing", return_value=plan):
+            summary = compute_weekly_summary(end_date)
+            message = format_weekly_message(summary)
+
+        assert "Weekly Pacing" not in message
+
+    def test_message_renders_without_crash_when_pacing_raises(self):
+        """
+        If weekly_pacing raises an exception, the weekly summary should still
+        render cleanly — the pacing section degrades silently.
+        """
+        from datetime import datetime
+        today = datetime.now()
+        end_date = today.strftime("%Y-%m-%d")
+        rolling = self._make_rolling([end_date])
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.weekly_pacing.compute_weekly_pacing",
+                   side_effect=RuntimeError("pacing unavailable")):
+            summary = compute_weekly_summary(end_date)
+            message = format_weekly_message(summary)
+
+        assert "Weekly Presence Summary" in message
+        assert "Weekly Pacing" not in message
