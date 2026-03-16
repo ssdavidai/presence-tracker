@@ -459,7 +459,44 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "baseline": _baseline(compare_days) if compare_days > 0 else None,
         # Daily Presence Score (DPS) — single composite 0–100 score
         "presence_score": _compute_dps(windows),
+        # Meeting Intelligence (v13) — FFS, CMC, SDR, MIS breakdown
+        "meeting_intel": _compute_meeting_intel(windows, date_str),
     }
+
+
+def _compute_meeting_intel(windows: list[dict], date_str: str) -> Optional[dict]:
+    """Compute Meeting Intelligence (v13); returns None when no meetings or on failure."""
+    try:
+        from analysis.meeting_intel import compute_meeting_intel, format_meeting_intel_terminal
+
+        # Extract WHOOP recovery from first window that has it
+        whoop_data: dict = {}
+        for w in windows:
+            wd = w.get("whoop") or {}
+            if wd.get("recovery_score") is not None:
+                whoop_data = wd
+                break
+
+        intel = compute_meeting_intel(windows, whoop_data, date_str)
+        if not intel.is_meaningful:
+            return None
+
+        return {
+            "mis": intel.meeting_intelligence_score,
+            "ffs": intel.focus_fragmentation_score,
+            "cmc": intel.cognitive_meeting_cost,
+            "sdr": intel.social_drain_rate,
+            "meeting_recovery_fit": intel.meeting_recovery_fit,
+            "total_meeting_minutes": intel.total_meeting_minutes,
+            "free_gap_minutes": intel.free_gap_minutes,
+            "peak_focus_threats": intel.peak_focus_threats,
+            "headline": intel.headline,
+            "advisory": intel.advisory,
+            # Pre-rendered terminal block
+            "terminal_block": format_meeting_intel_terminal(intel),
+        }
+    except Exception:
+        return None
 
 
 def _compute_dps(windows: list[dict]) -> Optional[dict]:
@@ -674,24 +711,12 @@ def print_full(report: dict, show_windows: bool = False) -> None:
             dur = b["windows"] * 15
             ppl = f"  {b['attendees']} attendees" if b["attendees"] > 1 else ""
             print(f"  {b['start']}  {b['title'][:35]}  ({dur} min){ppl}")
-        # ── Meeting Intelligence (v13 integration) ──────────────────────
-        # Show MIS + component breakdown when the day had meetings.
-        # Gracefully skipped when meeting_intel module is unavailable.
-        try:
-            from analysis.meeting_intel import compute_meeting_intel, format_meeting_intel_terminal
-            _whoop_data: dict = {}
-            for _w in windows:
-                _wd = _w.get("whoop") or {}
-                if _wd.get("recovery_score") is not None:
-                    _whoop_data = _wd
-                    break
-            _intel = compute_meeting_intel(windows, _whoop_data, report["date"])
-            if _intel.is_meaningful:
-                print()
-                print(_c("  Meeting Intelligence", BOLD))
-                print(format_meeting_intel_terminal(_intel))
-        except Exception:
-            pass  # Non-critical: never crash report over meeting intel
+        # ── Meeting Intelligence (v13) ───────────────────────────────────
+        _mi = report.get("meeting_intel")
+        if _mi and _mi.get("terminal_block"):
+            print()
+            print(_c("  Meeting Intelligence", BOLD))
+            print(_mi["terminal_block"])
         print()
     else:
         print(_c("  ⑤ Calendar", BOLD))
