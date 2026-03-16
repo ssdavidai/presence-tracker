@@ -97,6 +97,22 @@ async def run_weekly_summary(date_str: str) -> bool:
 
 
 @activity.defn
+async def generate_weekly_dashboard(date_str: str) -> str:
+    """Generate the weekly HTML presence dashboard for the 7 days ending on date_str.
+
+    Returns the path to the generated HTML file, or empty string on failure.
+    """
+    from analysis.weekly_dashboard import generate_weekly_dashboard as _gen
+    try:
+        path = _gen(date_str)
+        activity.logger.info(f"Weekly dashboard generated: {path}")
+        return str(path)
+    except Exception as e:
+        activity.logger.error(f"Weekly dashboard generation failed: {e}")
+        return ""
+
+
+@activity.defn
 async def retrain_ml_models(force: bool = False) -> dict:
     """Train (or retrain) the three scikit-learn ML models.
 

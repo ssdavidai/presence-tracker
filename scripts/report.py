@@ -461,6 +461,8 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "presence_score": _compute_dps(windows),
         # Meeting Intelligence (v13) — FFS, CMC, SDR, MIS breakdown
         "meeting_intel": _compute_meeting_intel(windows, date_str),
+        # Cognitive Debt Index (CDI) — multi-day fatigue accumulation
+        "cognitive_debt": _compute_cdi_for_report(date_str),
     }
 
 
@@ -511,6 +513,35 @@ def _compute_dps(windows: list[dict]) -> Optional[dict]:
             "tier": score.tier,
             "components": score.components,
             "block": format_presence_score_block(score),
+        }
+    except Exception:
+        return None
+
+
+def _compute_cdi_for_report(date_str: str) -> Optional[dict]:
+    """
+    Compute Cognitive Debt Index for a given date.
+
+    Returns a dict with CDI value, tier, trend, and a pre-formatted line,
+    or None when insufficient history (< MIN_DAYS) or on error.
+
+    Included in the report dict so it's available in --json output and
+    rendered in print_full() as a dedicated section.
+    """
+    try:
+        from analysis.cognitive_debt import compute_cdi, format_cdi_line
+        debt = compute_cdi(date_str)
+        if debt is None:
+            return None
+        return {
+            "cdi": round(debt.cdi, 1),
+            "tier": debt.tier,
+            "is_meaningful": debt.is_meaningful,
+            "days_used": debt.days_used,
+            "days_in_deficit": debt.days_in_deficit,
+            "days_in_surplus": debt.days_in_surplus,
+            "trend_5d": round(debt.trend_5d, 4) if debt.trend_5d is not None else None,
+            "line": format_cdi_line(debt),
         }
     except Exception:
         return None
@@ -684,15 +715,45 @@ def print_full(report: dict, show_windows: bool = False) -> None:
             print(f"  {line}")
         print()
 
+    # ── Cognitive Debt Index (CDI) ────────────────────────────────────────────
+    # Multi-day accumulated fatigue.  Only shown when meaningful (≥ MIN_DAYS data).
+    # Answers: "Is today's load eroding a deficit — or building a surplus?"
+    cdi_data = report.get("cognitive_debt")
+    if cdi_data and cdi_data.get("is_meaningful") and cdi_data.get("line"):
+        print(_c("  ③ Cognitive Debt Index", BOLD))
+        # Formatted summary line from format_cdi_line()
+        print(f"  {cdi_data['line']}")
+        # Supplementary detail row
+        days_used = cdi_data.get("days_used", 0)
+        deficit = cdi_data.get("days_in_deficit", 0)
+        surplus = cdi_data.get("days_in_surplus", 0)
+        trend = cdi_data.get("trend_5d")
+        detail_parts = [f"based on {days_used} days"]
+        if deficit > 0:
+            detail_parts.append(f"{deficit}d deficit")
+        if surplus > 0:
+            detail_parts.append(f"{surplus}d surplus")
+        if trend is not None and abs(trend) > 0.02:
+            direction = "↑ fatigue building" if trend > 0 else "↓ recovering"
+            detail_parts.append(direction)
+        print(_c(f"  ({', '.join(detail_parts)})", DIM))
+        print()
+    elif cdi_data and not cdi_data.get("is_meaningful"):
+        # Show a brief note so the user knows why CDI isn't rendered
+        days_used = cdi_data.get("days_used", 0)
+        print(_c("  ③ Cognitive Debt Index", BOLD))
+        print(_c(f"  Insufficient history ({days_used} day{'s' if days_used != 1 else ''} — needs ≥3)", DIM))
+        print()
+
     # ── Hourly Heatmap ────────────────────────────────────────────────────────
-    print(_c("  ③ Cognitive Load — Hourly", BOLD))
+    print(_c("  ④ Cognitive Load — Hourly", BOLD))
     hmap = _heatmap_line(report["hourly_cls"])
     print(f"  7am  {hmap}  10pm")
     print(_c("        ░=light  ▒=mild  ▓=moderate  █=heavy", DIM))
     print()
 
     # ── Focus Quality ─────────────────────────────────────────────────────────
-    print(_c("  ④ Focus Quality", BOLD))
+    print(_c("  ⑤ Focus Quality", BOLD))
     print(f"  Active windows   {f['active_windows']} of {f['total_working_windows']} working-hour windows")
     if f["active_fdi"] is not None:
         print(f"  Active FDI       {_pct(f['active_fdi'])}  {_bar(f['active_fdi'], 10)}")
@@ -705,7 +766,7 @@ def print_full(report: dict, show_windows: bool = False) -> None:
     # ── Calendar ─────────────────────────────────────────────────────────────
     cal = report["calendar"]
     if cal["meeting_minutes"] > 0:
-        print(_c("  ⑤ Calendar", BOLD))
+        print(_c("  ⑥ Calendar", BOLD))
         print(f"  Meetings         {cal['meeting_minutes']} min  ({cal['meeting_windows']} windows)")
         for b in cal["blocks"]:
             dur = b["windows"] * 15
@@ -719,13 +780,13 @@ def print_full(report: dict, show_windows: bool = False) -> None:
             print(_mi["terminal_block"])
         print()
     else:
-        print(_c("  ⑤ Calendar", BOLD))
+        print(_c("  ⑥ Calendar", BOLD))
         print(_c("  No meetings today", DIM))
         print()
 
     # ── Slack ─────────────────────────────────────────────────────────────────
     s = report["slack"]
-    print(_c("  ⑥ Slack", BOLD))
+    print(_c("  ⑦ Slack", BOLD))
     print(f"  Sent      {s['messages_sent']}")
     print(f"  Received  {s['messages_received']}")
     print(f"  Total     {s['total_messages']}")
@@ -734,7 +795,7 @@ def print_full(report: dict, show_windows: bool = False) -> None:
     # ── Omi ──────────────────────────────────────────────────────────────────
     omi = report.get("omi")
     if omi:
-        print(_c("  ⑦ Omi Conversations", BOLD))
+        print(_c("  ⑧ Omi Conversations", BOLD))
         print(f"  Sessions   {omi['total_sessions']}")
         print(f"  Windows    {omi['conversation_windows']}")
         print(f"  Words      {omi['total_words']:,}")
@@ -776,7 +837,7 @@ def print_full(report: dict, show_windows: bool = False) -> None:
     # ── RescueTime ────────────────────────────────────────────────────────────
     rt = report.get("rescuetime")
     if rt:
-        section_num = "⑧" if omi else "⑦"
+        section_num = "⑨" if omi else "⑧"
         print(_c(f"  {section_num} RescueTime", BOLD))
         print(f"  Computer   {rt['active_minutes']:.0f} min active")
         print(f"  Focus      {rt['focus_minutes']:.0f} min")

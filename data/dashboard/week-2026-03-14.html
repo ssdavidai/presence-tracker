@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Weekly Presence — Mar 8 – Mar 14, 2026</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d2e;
+    --surface2: #222538;
+    --border: #2d3048;
+    --text: #e2e8f0;
+    --muted: #6b7280;
+    --accent: #818cf8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 700; color: var(--accent); margin-bottom: 4px; }
+  .subtitle { font-size: 0.9rem; color: var(--muted); margin-bottom: 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+  h2 { font-size: 0.95rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px; }
+  .hero-grid { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; margin-bottom: 8px; }
+  .hero-item { display: flex; flex-direction: column; gap: 3px; min-width: 80px; }
+  .hero-val { font-size: 2rem; font-weight: 800; line-height: 1; }
+  .hero-tier { font-size: 0.78rem; font-weight: 600; }
+  .hero-lbl { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-grid { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; }
+  .stat-item { display: flex; flex-direction: column; gap: 3px; }
+  .stat-val { font-size: 1.05rem; font-weight: 700; }
+  .stat-lbl { font-size: 0.73rem; color: var(--muted); }
+  .chart-wrapper { overflow-x: auto; }
+  svg { display: block; }
+  footer { text-align: center; color: var(--muted); font-size: 0.74rem; margin-top: 32px; }
+  /* Coverage table */
+  .coverage-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .coverage-table th, .coverage-table td { padding: 6px 10px; text-align: center; border: 1px solid var(--border); }
+  .coverage-table thead th { background: var(--surface2); color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.04em; }
+  .coverage-table tbody td:first-child { text-align: left; color: var(--text); }
+  .cov-yes { color: #4ade80; font-weight: 700; }
+  .cov-no { color: #4b5563; }
+  .cov-miss { color: #374151; }
+  .dim { font-size: 0.72rem; color: var(--muted); font-weight: 400; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+</style>
+</head>
+<body>
+
+<h1>🧠 Weekly Presence Dashboard</h1>
+<p class="subtitle">Mar 8 – Mar 14, 2026 &nbsp;·&nbsp; 7/7 days with data &nbsp;·&nbsp; Generated 2026-03-16 19:49</p>
+
+<!-- Weekly hero summary -->
+<div class="card">
+  <h2>Week at a Glance</h2>
+  <div class="hero-grid">
+    <div class="hero-item">
+      <span class="hero-val" style="color:#facc15">79</span>
+      <span class="hero-tier" style="color:#facc15">Good</span>
+      <span class="hero-lbl">Avg DPS</span>
+    </div>
+    <div class="hero-item">
+      <span class="hero-val" style="color:#4ade80">80%</span>
+      <span class="hero-lbl">Avg Recovery</span>
+    </div>
+    <div class="hero-item">
+      <span class="hero-val" style="color:#facc15">74%</span>
+      <span class="hero-lbl">Avg FDI</span>
+    </div>
+    <div class="hero-item">
+      <span class="hero-val" style="color:#facc15">36%</span>
+      <span class="hero-lbl">Avg CLS</span>
+    </div>
+    <div class="hero-item">
+      <span class="hero-val" style="color:#9ca3af">12h15m</span>
+      <span class="hero-lbl">Total Meetings</span>
+    </div>
+  </div>
+  <hr class="divider"/>
+  <div class="stat-grid">
+    <div class="stat-item"><span class="stat-val" style="color:#4ade80">🌟 88</span><span class="stat-lbl">Best day — Saturday Mar 14</span></div>
+    <div class="stat-item"><span class="stat-val" style="color:#facc15">📉 70</span><span class="stat-lbl">Lowest day — Sunday Mar 8</span></div>
+  </div>
+</div>
+
+<!-- DPS Trend -->
+<div class="card">
+  <h2>📈 Daily Presence Score (DPS) — 7-Day Trend</h2>
+  <div class="chart-wrapper">
+    <svg viewBox="0 0 740 160" width="740" height="160" xmlns="http://www.w3.org/2000/svg">
+  <rect x="48" y="16.0" width="680" height="11.2" fill="#14532d" opacity="0.4"/>
+  <text x="52" y="27.0" font-size="9" fill="#6b7280">Exceptional</text>
+  <rect x="48" y="27.2" width="680" height="11.2" fill="#166534" opacity="0.4"/>
+  <text x="52" y="38.2" font-size="9" fill="#6b7280">Strong</text>
+  <rect x="48" y="38.4" width="680" height="11.2" fill="#1e3a1e" opacity="0.4"/>
+  <text x="52" y="49.4" font-size="9" fill="#6b7280">Good</text>
+  <rect x="48" y="49.6" width="680" height="11.2" fill="#2d2a10" opacity="0.4"/>
+  <text x="52" y="60.6" font-size="9" fill="#6b7280">Moderate</text>
+  <rect x="48" y="60.8" width="680" height="67.2" fill="#2d1515" opacity="0.4"/>
+  <line x1="44" y1="128.0" x2="728" y2="128.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="132.0" font-size="9" fill="#9ca3af" text-anchor="end">0</text>
+  <line x1="44" y1="105.6" x2="728" y2="105.6" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="109.6" font-size="9" fill="#9ca3af" text-anchor="end">20</text>
+  <line x1="44" y1="83.2" x2="728" y2="83.2" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="87.2" font-size="9" fill="#9ca3af" text-anchor="end">40</text>
+  <line x1="44" y1="60.8" x2="728" y2="60.8" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="64.8" font-size="9" fill="#9ca3af" text-anchor="end">60</text>
+  <line x1="44" y1="38.4" x2="728" y2="38.4" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="42.4" font-size="9" fill="#9ca3af" text-anchor="end">80</text>
+  <line x1="44" y1="16.0" x2="728" y2="16.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="20.0" font-size="9" fill="#9ca3af" text-anchor="end">100</text>
+  <path d="M 48.0 49.6 L 161.3 46.2 L 274.7 42.9 L 388.0 39.5 L 501.3 36.2 L 614.7 32.8 L 728.0 29.4" stroke="#818cf8" stroke-width="2" fill="none" stroke-linejoin="round"/>
+  <text x="48.0" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Sun</text>
+  <text x="48.0" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-08</text>
+  <circle cx="48.0" cy="49.6" r="4" fill="#facc15"/>
+  <text x="48.0" y="42.6" font-size="10" fill="#facc15" text-anchor="middle" font-weight="600">70</text>
+  <text x="161.3" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Mon</text>
+  <text x="161.3" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-09</text>
+  <circle cx="161.3" cy="46.2" r="4" fill="#facc15"/>
+  <text x="161.3" y="39.2" font-size="10" fill="#facc15" text-anchor="middle" font-weight="600">73</text>
+  <text x="274.7" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Tue</text>
+  <text x="274.7" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-10</text>
+  <circle cx="274.7" cy="42.9" r="4" fill="#facc15"/>
+  <text x="274.7" y="35.9" font-size="10" fill="#facc15" text-anchor="middle" font-weight="600">76</text>
+  <text x="388.0" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Wed</text>
+  <text x="388.0" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-11</text>
+  <circle cx="388.0" cy="39.5" r="4" fill="#facc15"/>
+  <text x="388.0" y="32.5" font-size="10" fill="#facc15" text-anchor="middle" font-weight="600">79</text>
+  <text x="501.3" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Thu</text>
+  <text x="501.3" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-12</text>
+  <circle cx="501.3" cy="36.2" r="4" fill="#4ade80"/>
+  <text x="501.3" y="29.2" font-size="10" fill="#4ade80" text-anchor="middle" font-weight="600">82</text>
+  <text x="614.7" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Fri</text>
+  <text x="614.7" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-13</text>
+  <circle cx="614.7" cy="32.8" r="4" fill="#4ade80"/>
+  <text x="614.7" y="25.8" font-size="10" fill="#4ade80" text-anchor="middle" font-weight="600">85</text>
+  <text x="728.0" y="156" font-size="9" fill="#9ca3af" text-anchor="middle">Sat</text>
+  <text x="728.0" y="146" font-size="8" fill="#6b7280" text-anchor="middle">03-14</text>
+  <circle cx="728.0" cy="29.4" r="4" fill="#4ade80"/>
+  <text x="728.0" y="22.4" font-size="10" fill="#4ade80" text-anchor="middle" font-weight="600">88</text>
+</svg>
+  </div>
+  <p style="font-size:0.72rem;color:var(--muted);margin-top:6px;">Green band ≥90 (exceptional) · Mid-green ≥80 (strong) · Dark ≥70 (good)</p>
+</div>
+
+<!-- Metric Grid -->
+<div class="card">
+  <h2>📐 Metrics Per Day (CLS / FDI / RAS)</h2>
+  <div class="chart-wrapper">
+    <svg viewBox="0 0 740 140" width="740" height="140" xmlns="http://www.w3.org/2000/svg">
+  <line x1="36" y1="100.0" x2="728" y2="100.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="34" y="104.0" font-size="9" fill="#9ca3af" text-anchor="end">0%</text>
+  <line x1="36" y1="79.0" x2="728" y2="79.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="34" y="83.0" font-size="9" fill="#9ca3af" text-anchor="end">25%</text>
+  <line x1="36" y1="58.0" x2="728" y2="58.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="34" y="62.0" font-size="9" fill="#9ca3af" text-anchor="end">50%</text>
+  <line x1="36" y1="37.0" x2="728" y2="37.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="34" y="41.0" font-size="9" fill="#9ca3af" text-anchor="end">75%</text>
+  <line x1="36" y1="16.0" x2="728" y2="16.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="34" y="20.0" font-size="9" fill="#9ca3af" text-anchor="end">100%</text>
+  <text x="89.1" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Sun</text>
+  <text x="89.1" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-08</text>
+  <rect x="51.8" y="74.8" width="19.7" height="25.2" fill="#facc15" rx="2"/>
+  <text x="61.6" y="71.8" font-size="8" fill="#facc15" text-anchor="middle">30%</text>
+  <rect x="79.3" y="32.8" width="19.7" height="67.2" fill="#4ade80" rx="2"/>
+  <text x="89.1" y="29.8" font-size="8" fill="#4ade80" text-anchor="middle">80%</text>
+  <rect x="106.8" y="28.6" width="19.7" height="71.4" fill="#4ade80" rx="2"/>
+  <text x="116.7" y="25.6" font-size="8" fill="#4ade80" text-anchor="middle">85%</text>
+  <text x="187.4" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Mon</text>
+  <text x="187.4" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-09</text>
+  <rect x="150.1" y="73.1" width="19.7" height="26.9" fill="#facc15" rx="2"/>
+  <text x="159.9" y="70.1" font-size="8" fill="#facc15" text-anchor="middle">32%</text>
+  <rect x="177.6" y="34.5" width="19.7" height="65.5" fill="#4ade80" rx="2"/>
+  <text x="187.4" y="31.5" font-size="8" fill="#4ade80" text-anchor="middle">78%</text>
+  <rect x="205.1" y="30.3" width="19.7" height="69.7" fill="#4ade80" rx="2"/>
+  <text x="214.9" y="27.3" font-size="8" fill="#4ade80" text-anchor="middle">83%</text>
+  <text x="285.7" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Tue</text>
+  <text x="285.7" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-10</text>
+  <rect x="248.4" y="71.4" width="19.7" height="28.6" fill="#facc15" rx="2"/>
+  <text x="258.2" y="68.4" font-size="8" fill="#facc15" text-anchor="middle">34%</text>
+  <rect x="275.9" y="36.2" width="19.7" height="63.8" fill="#4ade80" rx="2"/>
+  <text x="285.7" y="33.2" font-size="8" fill="#4ade80" text-anchor="middle">76%</text>
+  <rect x="303.4" y="32.0" width="19.7" height="68.0" fill="#4ade80" rx="2"/>
+  <text x="313.2" y="29.0" font-size="8" fill="#4ade80" text-anchor="middle">81%</text>
+  <text x="384.0" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Wed</text>
+  <text x="384.0" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-11</text>
+  <rect x="346.7" y="69.8" width="19.7" height="30.2" fill="#facc15" rx="2"/>
+  <text x="356.5" y="66.8" font-size="8" fill="#facc15" text-anchor="middle">36%</text>
+  <rect x="374.2" y="37.8" width="19.7" height="62.2" fill="#facc15" rx="2"/>
+  <text x="384.0" y="34.8" font-size="8" fill="#facc15" text-anchor="middle">74%</text>
+  <rect x="401.7" y="33.6" width="19.7" height="66.4" fill="#4ade80" rx="2"/>
+  <text x="411.5" y="30.6" font-size="8" fill="#4ade80" text-anchor="middle">79%</text>
+  <text x="482.3" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Thu</text>
+  <text x="482.3" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-12</text>
+  <rect x="444.9" y="68.1" width="19.7" height="31.9" fill="#facc15" rx="2"/>
+  <text x="454.8" y="65.1" font-size="8" fill="#facc15" text-anchor="middle">38%</text>
+  <rect x="472.5" y="39.5" width="19.7" height="60.5" fill="#facc15" rx="2"/>
+  <text x="482.3" y="36.5" font-size="8" fill="#facc15" text-anchor="middle">72%</text>
+  <rect x="500.0" y="35.3" width="19.7" height="64.7" fill="#4ade80" rx="2"/>
+  <text x="509.8" y="32.3" font-size="8" fill="#4ade80" text-anchor="middle">77%</text>
+  <text x="580.6" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Fri</text>
+  <text x="580.6" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-13</text>
+  <rect x="543.2" y="66.4" width="19.7" height="33.6" fill="#facc15" rx="2"/>
+  <text x="553.1" y="63.4" font-size="8" fill="#facc15" text-anchor="middle">40%</text>
+  <rect x="570.7" y="41.2" width="19.7" height="58.8" fill="#facc15" rx="2"/>
+  <text x="580.6" y="38.2" font-size="8" fill="#facc15" text-anchor="middle">70%</text>
+  <rect x="598.3" y="37.0" width="19.7" height="63.0" fill="#4ade80" rx="2"/>
+  <text x="608.1" y="34.0" font-size="8" fill="#4ade80" text-anchor="middle">75%</text>
+  <text x="678.9" y="136" font-size="9" fill="#9ca3af" text-anchor="middle">Sat</text>
+  <text x="678.9" y="126" font-size="8" fill="#6b7280" text-anchor="middle">03-14</text>
+  <rect x="641.5" y="64.7" width="19.7" height="35.3" fill="#facc15" rx="2"/>
+  <text x="651.3" y="61.7" font-size="8" fill="#facc15" text-anchor="middle">42%</text>
+  <rect x="669.0" y="42.9" width="19.7" height="57.1" fill="#facc15" rx="2"/>
+  <text x="678.9" y="39.9" font-size="8" fill="#facc15" text-anchor="middle">68%</text>
+  <rect x="696.5" y="38.7" width="19.7" height="61.3" fill="#facc15" rx="2"/>
+  <text x="706.4" y="35.7" font-size="8" fill="#facc15" text-anchor="middle">73%</text>
+  <rect x="40" y="4" width="8" height="8" fill="#f87171" rx="1"/>
+  <text x="50" y="11" font-size="9" fill="#9ca3af">CLS (load)</text>
+  <rect x="125" y="4" width="8" height="8" fill="#4ade80" rx="1"/>
+  <text x="135" y="11" font-size="9" fill="#9ca3af">FDI (focus)</text>
+  <rect x="210" y="4" width="8" height="8" fill="#818cf8" rx="1"/>
+  <text x="220" y="11" font-size="9" fill="#9ca3af">RAS (align)</text>
+</svg>
+  </div>
+  <p style="font-size:0.72rem;color:var(--muted);margin-top:6px;">CLS = cognitive load (low is good) · FDI = focus depth (high is good) · RAS = recovery alignment (high is good)</p>
+</div>
+
+<!-- Recovery -->
+<div class="card">
+  <h2>💚 WHOOP Recovery — 7-Day Arc</h2>
+  <div class="chart-wrapper">
+    <svg viewBox="0 0 740 120" width="740" height="120" xmlns="http://www.w3.org/2000/svg">
+  <rect x="48" y="16.0" width="680" height="23.8" fill="#14532d" opacity="0.3"/>
+  <rect x="48" y="39.8" width="680" height="23.8" fill="#78350f" opacity="0.3"/>
+  <rect x="48" y="63.5" width="680" height="24.5" fill="#7f1d1d" opacity="0.3"/>
+  <line x1="44" y1="88.0" x2="728" y2="88.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="92.0" font-size="9" fill="#9ca3af" text-anchor="end">0%</text>
+  <line x1="44" y1="70.0" x2="728" y2="70.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="74.0" font-size="9" fill="#9ca3af" text-anchor="end">25%</text>
+  <line x1="44" y1="52.0" x2="728" y2="52.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="56.0" font-size="9" fill="#9ca3af" text-anchor="end">50%</text>
+  <line x1="44" y1="39.8" x2="728" y2="39.8" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="43.8" font-size="9" fill="#9ca3af" text-anchor="end">67%</text>
+  <line x1="44" y1="34.0" x2="728" y2="34.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="38.0" font-size="9" fill="#9ca3af" text-anchor="end">75%</text>
+  <line x1="44" y1="16.0" x2="728" y2="16.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="20.0" font-size="9" fill="#9ca3af" text-anchor="end">100%</text>
+  <path d="M 48.0 88.0 L 48.0 34.0 L 161.3 32.9 L 274.7 31.8 L 388.0 30.8 L 501.3 29.7 L 614.7 28.6 L 728.0 27.5 L 728.0 88.0 Z" fill="#3b82f6" opacity="0.25"/>
+  <path d="M 48.0 34.0 L 161.3 32.9 L 274.7 31.8 L 388.0 30.8 L 501.3 29.7 L 614.7 28.6 L 728.0 27.5 " stroke="#3b82f6" stroke-width="1.5" fill="none"/>
+  <text x="48.0" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Sun</text>
+  <text x="48.0" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-08</text>
+  <circle cx="48.0" cy="34.0" r="3.5" fill="#4ade80"/>
+  <text x="48.0" y="28.0" font-size="9" fill="#4ade80" text-anchor="middle">75%</text>
+  <text x="161.3" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Mon</text>
+  <text x="161.3" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-09</text>
+  <circle cx="161.3" cy="32.9" r="3.5" fill="#4ade80"/>
+  <text x="161.3" y="26.9" font-size="9" fill="#4ade80" text-anchor="middle">76%</text>
+  <text x="274.7" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Tue</text>
+  <text x="274.7" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-10</text>
+  <circle cx="274.7" cy="31.8" r="3.5" fill="#4ade80"/>
+  <text x="274.7" y="25.8" font-size="9" fill="#4ade80" text-anchor="middle">78%</text>
+  <text x="388.0" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Wed</text>
+  <text x="388.0" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-11</text>
+  <circle cx="388.0" cy="30.8" r="3.5" fill="#4ade80"/>
+  <text x="388.0" y="24.8" font-size="9" fill="#4ade80" text-anchor="middle">80%</text>
+  <text x="501.3" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Thu</text>
+  <text x="501.3" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-12</text>
+  <circle cx="501.3" cy="29.7" r="3.5" fill="#4ade80"/>
+  <text x="501.3" y="23.7" font-size="9" fill="#4ade80" text-anchor="middle">81%</text>
+  <text x="614.7" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Fri</text>
+  <text x="614.7" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-13</text>
+  <circle cx="614.7" cy="28.6" r="3.5" fill="#4ade80"/>
+  <text x="614.7" y="22.6" font-size="9" fill="#4ade80" text-anchor="middle">82%</text>
+  <text x="728.0" y="116" font-size="9" fill="#9ca3af" text-anchor="middle">Sat</text>
+  <text x="728.0" y="106" font-size="8" fill="#6b7280" text-anchor="middle">03-14</text>
+  <circle cx="728.0" cy="27.5" r="3.5" fill="#4ade80"/>
+  <text x="728.0" y="21.5" font-size="9" fill="#4ade80" text-anchor="middle">84%</text>
+</svg>
+  </div>
+  <p style="font-size:0.72rem;color:var(--muted);margin-top:6px;">Green ≥67% · Yellow 34–66% · Red &lt;34%</p>
+</div>
+
+<!-- Meetings -->
+<div class="card">
+  <h2>📅 Meeting Load Per Day</h2>
+  <div class="chart-wrapper">
+    <svg viewBox="0 0 740 100" width="740" height="100" xmlns="http://www.w3.org/2000/svg">
+  <line x1="44" y1="64.0" x2="728" y2="64.0" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="68.0" font-size="9" fill="#9ca3af" text-anchor="end">0</text>
+  <line x1="44" y1="41.6" x2="728" y2="41.6" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="45.6" font-size="9" fill="#9ca3af" text-anchor="end">1h</text>
+  <line x1="44" y1="19.2" x2="728" y2="19.2" stroke="#374151" stroke-width="0.5"/>
+  <text x="42" y="23.2" font-size="9" fill="#9ca3af" text-anchor="end">2h</text>
+  <text x="96.6" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Sun</text>
+  <text x="96.6" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-08</text>
+  <rect x="69.9" y="41.6" width="53.4" height="22.4" fill="#facc15" rx="2"/>
+  <text x="96.6" y="38.6" font-size="8" fill="#facc15" text-anchor="middle">1h00m</text>
+  <text x="193.7" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Mon</text>
+  <text x="193.7" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-09</text>
+  <rect x="167.0" y="36.0" width="53.4" height="28.0" fill="#facc15" rx="2"/>
+  <text x="193.7" y="33.0" font-size="8" fill="#facc15" text-anchor="middle">1h15m</text>
+  <text x="290.9" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Tue</text>
+  <text x="290.9" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-10</text>
+  <rect x="264.1" y="30.4" width="53.4" height="33.6" fill="#facc15" rx="2"/>
+  <text x="290.9" y="27.4" font-size="8" fill="#facc15" text-anchor="middle">1h30m</text>
+  <text x="388.0" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Wed</text>
+  <text x="388.0" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-11</text>
+  <rect x="361.3" y="24.8" width="53.4" height="39.2" fill="#facc15" rx="2"/>
+  <text x="388.0" y="21.8" font-size="8" fill="#facc15" text-anchor="middle">1h45m</text>
+  <text x="485.1" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Thu</text>
+  <text x="485.1" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-12</text>
+  <rect x="458.4" y="19.2" width="53.4" height="44.8" fill="#fb923c" rx="2"/>
+  <text x="485.1" y="16.2" font-size="8" fill="#fb923c" text-anchor="middle">2h00m</text>
+  <text x="582.3" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Fri</text>
+  <text x="582.3" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-13</text>
+  <rect x="555.6" y="13.6" width="53.4" height="50.4" fill="#fb923c" rx="2"/>
+  <text x="582.3" y="10.6" font-size="8" fill="#fb923c" text-anchor="middle">2h15m</text>
+  <text x="679.4" y="96" font-size="9" fill="#9ca3af" text-anchor="middle">Sat</text>
+  <text x="679.4" y="86" font-size="8" fill="#6b7280" text-anchor="middle">03-14</text>
+  <rect x="652.7" y="8.0" width="53.4" height="56.0" fill="#fb923c" rx="2"/>
+  <text x="679.4" y="5.0" font-size="8" fill="#fb923c" text-anchor="middle">2h30m</text>
+</svg>
+  </div>
+  <p style="font-size:0.72rem;color:var(--muted);margin-top:6px;">Total: 12h15m across 7 days. Green &lt;1h · Yellow 1–2h · Orange 2–3h · Red &gt;3h</p>
+</div>
+
+<!-- Source coverage -->
+<div class="card">
+  <h2>🔌 Data Source Coverage</h2>
+  <table class='coverage-table'><thead><tr>
+<th>Source</th>
+<th>Sun<br/><span class='dim'>03-08</span></th>
+<th>Mon<br/><span class='dim'>03-09</span></th>
+<th>Tue<br/><span class='dim'>03-10</span></th>
+<th>Wed<br/><span class='dim'>03-11</span></th>
+<th>Thu<br/><span class='dim'>03-12</span></th>
+<th>Fri<br/><span class='dim'>03-13</span></th>
+<th>Sat<br/><span class='dim'>03-14</span></th>
+</tr></thead><tbody>
+<tr><td>💚 whoop</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+</tr>
+<tr><td>📅 calendar</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+</tr>
+<tr><td>💬 slack</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+</tr>
+<tr><td>⏱ rescuetime</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+<td class='cov-yes'>✓</td>
+</tr>
+<tr><td>🎙 omi</td>
+<td class='cov-no'>✗</td>
+<td class='cov-no'>✗</td>
+<td class='cov-no'>✗</td>
+<td class='cov-no'>✗</td>
+<td class='cov-no'>✗</td>
+<td class='cov-no'>✗</td>
+<td class='cov-no'>✗</td>
+</tr>
+</tbody></table>
+</div>
+
+<footer>
+  Presence Tracker Weekly Dashboard · Mar 8 – Mar 14, 2026 · Generated 2026-03-16 19:49
+</footer>
+
+</body>
+</html>

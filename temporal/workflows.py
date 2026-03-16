@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
         send_morning_readiness_brief,
         notify_slack_presence,
         generate_daily_dashboard,
+        generate_weekly_dashboard,
         run_anomaly_alerts,
         retrain_ml_models,
     )
@@ -177,7 +178,15 @@ class WeeklyAnalysisWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
-        # ── Step 2: AI Intuition report (LLM, slower) ────────────────────
+        # ── Step 2: Weekly HTML dashboard ─────────────────────────────────
+        weekly_dashboard_path = await workflow.execute_activity(
+            generate_weekly_dashboard,
+            args=[date_str],
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+
+        # ── Step 3: AI Intuition report (LLM, slower) ────────────────────
         intuition_ok = await workflow.execute_activity(
             run_weekly_intuition,
             start_to_close_timeout=timedelta(minutes=10),
@@ -194,6 +203,8 @@ class WeeklyAnalysisWorkflow:
             detail_parts.append("intuition ✓")
         else:
             detail_parts.append("intuition ✗")
+        if weekly_dashboard_path:
+            detail_parts.append("dashboard ✓")
 
         log_msg = f"[PRESENCE] Weekly analysis {status} — {', '.join(detail_parts)}"
         await workflow.execute_activity(

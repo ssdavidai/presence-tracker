@@ -10,6 +10,7 @@ Sends David a morning Slack DM at 07:00 Budapest time with:
 - Today's calendar preview with schedule-aware recommendations (v7.0)
 - Cognitive Debt Index — accumulated fatigue signal (v8.0)
 - DPS trend — cognitive day quality trajectory over last 7 days (v9.0)
+- Predicted Cognitive Load Forecast — expected CLS based on today's calendar (v14.0)
 
 This is the forward-looking complement to the end-of-day digest.
 The digest tells you how the day went; the morning brief tells you
@@ -629,6 +630,12 @@ def compute_morning_brief(
         # when to protect focused work time.  Answers: "When should I block focus time?"
         # Returns None when tomorrow_calendar is unavailable (graceful degradation).
         "tomorrow_focus_plan": _compute_focus_plan_for_brief(today_date, today_calendar),
+        # v14.0: Predicted Cognitive Load Forecast — estimate today's expected CLS
+        # from today's calendar meeting load vs. historical CLS on similar-load days.
+        # Answers: "Before the day starts, how demanding will it likely be?"
+        # Complements WHOOP readiness (capacity) with a demand estimate (load forecast).
+        # Returns None when < 2 days of history exist (graceful degradation).
+        "load_forecast": _compute_load_forecast_for_brief(today_date, today_calendar),
     }
 
 
@@ -735,6 +742,40 @@ def _compute_focus_plan_for_brief(today_date_str: str, today_calendar: Optional[
             "is_meaningful": plan.is_meaningful,
             "block_count": len(plan.recommended_blocks),
             "cdi_tier": plan.cdi_tier,
+        }
+    except Exception:
+        return None
+
+
+def _compute_load_forecast_for_brief(
+    date_str: str,
+    today_calendar: Optional[dict] = None,
+) -> Optional[dict]:
+    """
+    Compute the predicted CLS forecast for the morning brief.
+
+    Uses today's meeting minutes (from today_calendar) + historical CLS
+    patterns from similar-load days to estimate the day's expected CLS.
+
+    Returns a dict with forecast data, or None when not meaningful.
+
+    v14.0: Added load forecast to morning brief.
+    """
+    try:
+        from analysis.load_forecast import compute_load_forecast, format_forecast_line
+        forecast = compute_load_forecast(date_str, today_calendar)
+        if not forecast.is_meaningful:
+            return None
+        return {
+            "line": format_forecast_line(forecast),
+            "predicted_cls": forecast.predicted_cls,
+            "cls_low": forecast.cls_low,
+            "cls_high": forecast.cls_high,
+            "load_label": forecast.load_label,
+            "confidence": forecast.confidence,
+            "matching_days": forecast.matching_days,
+            "narrative": forecast.narrative,
+            "is_meaningful": True,
         }
     except Exception:
         return None
@@ -926,6 +967,20 @@ def format_morning_brief_message(brief: dict) -> str:
         if dps_trend_line:
             lines.append("")
             lines.append(f"_{dps_trend_line}_")
+
+    # ── Load Forecast (v14.0) ─────────────────────────────────────────────
+    # Predicted CLS for today based on meeting load vs. historical patterns.
+    # "Before the day starts, how cognitively demanding will it likely be?"
+    # This bridges WHOOP capacity (what you have) with calendar demand (what's coming).
+    # Shown between the multi-day trend signals and tomorrow's focus plan so it
+    # flows naturally: "Here's your capacity — here's today's likely demand —
+    # here's tomorrow's plan."
+    load_forecast = brief.get("load_forecast")
+    if load_forecast and load_forecast.get("is_meaningful"):
+        forecast_line = load_forecast.get("line", "")
+        if forecast_line:
+            lines.append("")
+            lines.append(forecast_line)
 
     # ── Tomorrow's Focus Plan (v10.0) ─────────────────────────────────────
     # Specific time blocks for deep work tomorrow, combining:
