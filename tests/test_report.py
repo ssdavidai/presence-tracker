@@ -131,6 +131,12 @@ def _make_window(
             "audio_seconds": 120.0,
             "sessions_count": 1,
             "speech_ratio": 0.5,
+            # v10.1: topic classifier fields (optional — mirrors real JSONL output)
+            "topic_category": None,
+            "cognitive_density": None,
+            "cls_weight": 1.0,
+            "sdi_weight": 1.0,
+            "topic_signals": [],
         }
     if rt_active > 0:
         w["rescuetime"] = {
@@ -446,6 +452,92 @@ class TestOmiStats:
         windows[32]["omi"]["speech_seconds"] = 120.0  # 2 minutes
         result = _omi_stats(windows)
         assert result["total_speech_minutes"] == 2.0
+
+    # ── v10.1 topic fields ────────────────────────────────────────────────────
+
+    def test_no_topic_data_dominant_topic_is_none(self):
+        """When no topic_category in omi windows, dominant_topic is None."""
+        windows = _make_day_windows(0)
+        windows[32] = _make_window(32, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=200)
+        # topic_category is None in the default _make_window helper
+        result = _omi_stats(windows)
+        assert result["dominant_topic"] is None
+        assert result["category_counts"] is None
+
+    def test_topic_category_counted(self):
+        """When topic_category is set, category_counts reflects it."""
+        windows = _make_day_windows(0)
+        windows[32] = _make_window(32, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=300)
+        windows[32]["omi"]["topic_category"] = "work_technical"
+        windows[33] = _make_window(33, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=200)
+        windows[33]["omi"]["topic_category"] = "work_technical"
+        result = _omi_stats(windows)
+        assert result["category_counts"] == {"work_technical": 2}
+        assert result["dominant_topic"] == "work_technical"
+
+    def test_mixed_topics_dominant_selected(self):
+        """When multiple categories, dominant_topic is the most frequent."""
+        windows = _make_day_windows(0)
+        # 2 personal windows, 1 technical window
+        for i, (cat, words) in enumerate([("personal", 200), ("personal", 150), ("work_technical", 400)]):
+            idx = 32 + i
+            windows[idx] = _make_window(idx, 8, is_working=True, is_active=True,
+                                        omi_active=True, omi_words=words)
+            windows[idx]["omi"]["topic_category"] = cat
+        result = _omi_stats(windows)
+        assert result["dominant_topic"] == "personal"
+        assert result["category_counts"]["personal"] == 2
+        assert result["category_counts"]["work_technical"] == 1
+
+    def test_cognitive_density_averaged(self):
+        """mean_cognitive_density should average density across Omi windows."""
+        windows = _make_day_windows(0)
+        windows[32] = _make_window(32, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=200)
+        windows[32]["omi"]["cognitive_density"] = 0.6
+        windows[33] = _make_window(33, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=200)
+        windows[33]["omi"]["cognitive_density"] = 0.8
+        result = _omi_stats(windows)
+        assert result["mean_cognitive_density"] == pytest.approx(0.7, abs=0.01)
+
+    def test_no_cognitive_density_returns_none(self):
+        """mean_cognitive_density is None when no density values in windows."""
+        windows = _make_day_windows(0)
+        windows[32] = _make_window(32, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=200)
+        # cognitive_density is None in default _make_window omi block
+        result = _omi_stats(windows)
+        assert result["mean_cognitive_density"] is None
+
+    def test_unknown_category_excluded_from_counts(self):
+        """'unknown' category should not appear in category_counts."""
+        windows = _make_day_windows(0)
+        windows[32] = _make_window(32, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=100)
+        windows[32]["omi"]["topic_category"] = "unknown"
+        result = _omi_stats(windows)
+        assert result["category_counts"] is None or "unknown" not in (result["category_counts"] or {})
+
+    def test_result_has_all_required_keys(self):
+        """_omi_stats result must contain both v2 and v10.1 keys."""
+        windows = _make_day_windows(0)
+        windows[32] = _make_window(32, 8, is_working=True, is_active=True,
+                                   omi_active=True, omi_words=100)
+        result = _omi_stats(windows)
+        assert result is not None
+        # v2.0 keys
+        assert "conversation_windows" in result
+        assert "total_sessions" in result
+        assert "total_words" in result
+        assert "total_speech_minutes" in result
+        # v10.1 keys
+        assert "dominant_topic" in result
+        assert "category_counts" in result
+        assert "mean_cognitive_density" in result
 
 
 # ─── _rt_stats() ──────────────────────────────────────────────────────────────

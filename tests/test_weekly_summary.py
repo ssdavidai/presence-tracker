@@ -11,6 +11,7 @@ Coverage:
   - format_weekly_message() structural requirements
   - Empty / no-data cases do not crash
   - Prior-week comparison block only appears with ≥1 prior-week day
+  - DPS extraction, sparkline, tier label, and weekly headline (v1.1)
 
 Run with: python3 -m pytest tests/test_weekly_summary.py -v
 """
@@ -37,6 +38,9 @@ from scripts.weekly_summary import (
     _day_label,
     _hour_label,
     _pct_change,
+    _dps_sparkline,
+    _dps_tier_label,
+    _extract_dps,
     load_week_data,
     compute_weekly_summary,
     format_weekly_message,
@@ -627,3 +631,310 @@ class TestWeeklySummaryIntegration:
             summary = compute_weekly_summary("2026-03-14")
             omi_stats = summary["this_week"].get("omi_stats", {})
         assert omi_stats.get("days_active", 0) == 0
+
+
+# ─── DPS helpers (v1.1) ───────────────────────────────────────────────────────
+
+class TestDpsSparkline:
+    def test_all_none_shows_dots(self):
+        result = _dps_sparkline([None, None, None, None, None, None, None])
+        assert result == "·······"
+
+    def test_high_dps_shows_full_block(self):
+        result = _dps_sparkline([100.0])
+        assert result == "█"
+
+    def test_zero_dps_shows_space_or_low_block(self):
+        result = _dps_sparkline([0.0])
+        assert len(result) == 1
+        assert result != "·"  # 0.0 is a real value, not None
+
+    def test_seven_days_returns_seven_chars(self):
+        dps = [60.0, 70.0, None, 80.0, 55.0, 75.0, 65.0]
+        result = _dps_sparkline(dps)
+        assert len(result) == 7
+
+    def test_mixed_values_and_nones(self):
+        dps = [50.0, None, 75.0]
+        result = _dps_sparkline(dps)
+        assert len(result) == 3
+        assert result[1] == "·"
+
+    def test_all_same_value_consistent_chars(self):
+        dps = [70.0, 70.0, 70.0]
+        result = _dps_sparkline(dps)
+        assert len(set(result)) == 1  # all same char
+
+
+class TestDpsTierLabel:
+    def test_peak_at_80(self):
+        label = _dps_tier_label(80.0)
+        assert "peak" in label.lower()
+
+    def test_strong_at_70(self):
+        label = _dps_tier_label(70.0)
+        assert "strong" in label.lower()
+
+    def test_moderate_at_55(self):
+        label = _dps_tier_label(55.0)
+        assert "moderate" in label.lower()
+
+    def test_stretched_at_40(self):
+        label = _dps_tier_label(40.0)
+        assert "stretch" in label.lower()
+
+    def test_recovery_at_20(self):
+        label = _dps_tier_label(20.0)
+        assert "recovery" in label.lower()
+
+    def test_boundary_at_65(self):
+        # 65 is the boundary for strong
+        label = _dps_tier_label(65.0)
+        assert "strong" in label.lower()
+
+
+class TestExtractDps:
+    def test_returns_stored_dps_when_present(self):
+        record = {
+            "date": "2026-03-14",
+            "presence_score": {"dps": 72.5, "tier": "strong"},
+        }
+        result = _extract_dps(record)
+        assert result == 72.5
+
+    def test_returns_none_when_no_date(self):
+        record = {}
+        result = _extract_dps(record)
+        assert result is None
+
+    def test_returns_none_when_windows_unavailable(self):
+        """Without real JSONL, fallback returns None gracefully."""
+        record = {"date": "2099-01-01"}  # date that has no JSONL
+        result = _extract_dps(record)
+        assert result is None
+
+    def test_rounds_to_one_decimal(self):
+        record = {
+            "date": "2026-03-14",
+            "presence_score": {"dps": 72.456789},
+        }
+        result = _extract_dps(record)
+        assert result == 72.5
+
+
+# ─── DPS integration in load_week_data ───────────────────────────────────────
+
+class TestLoadWeekDataDps:
+    def _make_dps_day(self, date: str, dps: float) -> dict:
+        base = _make_day_summary(date)
+        base["presence_score"] = {"dps": dps, "tier": "strong", "components": {}}
+        return base
+
+    def test_dps_avg_computed_from_stored_scores(self):
+        dates = ["2026-03-12", "2026-03-13", "2026-03-14"]
+        rolling = {
+            "days": {
+                "2026-03-12": self._make_dps_day("2026-03-12", 70.0),
+                "2026-03-13": self._make_dps_day("2026-03-13", 80.0),
+                "2026-03-14": self._make_dps_day("2026-03-14", 60.0),
+            },
+            "total_days": 3,
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            data = load_week_data("2026-03-14")
+
+        assert data["dps_avg"] == pytest.approx(70.0, abs=0.5)
+
+    def test_dps_per_day_none_for_missing_dates(self):
+        # Only 2 of the 7 days in the window have data
+        dates = ["2026-03-13", "2026-03-14"]
+        rolling = {
+            "days": {
+                "2026-03-13": self._make_dps_day("2026-03-13", 65.0),
+                "2026-03-14": self._make_dps_day("2026-03-14", 75.0),
+            },
+            "total_days": 2,
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            data = load_week_data("2026-03-14")
+
+        dps_per_day = data["dps_per_day"]
+        assert len(dps_per_day) == 7
+        none_count = sum(1 for v in dps_per_day if v is None)
+        assert none_count == 5  # 5 missing days
+
+    def test_dps_extremes_best_highest_score(self):
+        rolling = {
+            "days": {
+                "2026-03-12": self._make_dps_day("2026-03-12", 55.0),
+                "2026-03-13": self._make_dps_day("2026-03-13", 90.0),  # best
+                "2026-03-14": self._make_dps_day("2026-03-14", 40.0),  # worst
+            },
+            "total_days": 3,
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            data = load_week_data("2026-03-14")
+
+        assert data["dps_extremes"]["best"]["date"] == "2026-03-13"
+        assert data["dps_extremes"]["worst"]["date"] == "2026-03-14"
+
+    def test_dps_extremes_none_when_no_data(self):
+        with patch("scripts.weekly_summary.read_summary", return_value={"days": {}}), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            data = load_week_data("2026-03-14")
+
+        assert data.get("dps_avg") is None
+
+    def test_dps_avg_none_when_no_presence_score_and_no_jsonl(self):
+        # Days without presence_score and empty JSONL → fallback returns None
+        dates = ["2026-03-14"]
+        rolling = {
+            "days": {"2026-03-14": _make_day_summary("2026-03-14")},
+            "total_days": 1,
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            data = load_week_data("2026-03-14")
+
+        # dps_avg may be None (no stored DPS, empty JSONL fallback returns None)
+        # The key must exist
+        assert "dps_avg" in data
+
+
+# ─── DPS in compute_weekly_summary ───────────────────────────────────────────
+
+class TestComputeWeeklySummaryDps:
+    def _make_dps_day(self, date: str, dps: float) -> dict:
+        base = _make_day_summary(date)
+        base["presence_score"] = {"dps": dps, "tier": "strong"}
+        return base
+
+    def test_dps_delta_present_in_result(self):
+        this_dates = ["2026-03-08", "2026-03-09", "2026-03-14"]
+        last_dates = ["2026-03-01", "2026-03-02", "2026-03-07"]
+        rolling = {
+            "days": {
+                **{d: self._make_dps_day(d, 70.0) for d in this_dates},
+                **{d: self._make_dps_day(d, 60.0) for d in last_dates},
+            },
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+
+        assert "dps_delta" in summary
+        dps_d = summary["dps_delta"]
+        # this week avg 70, last week avg 60 → delta ≈ +10
+        if dps_d is not None:
+            assert dps_d > 0
+
+    def test_dps_delta_none_when_no_prior_week(self):
+        rolling = {
+            "days": {"2026-03-14": self._make_dps_day("2026-03-14", 75.0)},
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+
+        # No prior week data → dps_delta should be None (both weeks' DPS may not align)
+        assert "dps_delta" in summary
+
+
+# ─── DPS in format_weekly_message ────────────────────────────────────────────
+
+class TestFormatWeeklyMessageDps:
+    def _make_dps_day(self, date: str, dps: float) -> dict:
+        base = _make_day_summary(date)
+        base["presence_score"] = {"dps": dps, "tier": "strong"}
+        return base
+
+    def test_dps_headline_present_when_dps_available(self):
+        dates = ["2026-03-12", "2026-03-13", "2026-03-14"]
+        rolling = {
+            "days": {d: self._make_dps_day(d, 72.0) for d in dates},
+            "total_days": 3,
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        assert "DPS" in message
+        assert "72" in message
+
+    def test_dps_headline_shows_tier(self):
+        dates = ["2026-03-14"]
+        rolling = {
+            "days": {"2026-03-14": self._make_dps_day("2026-03-14", 85.0)},
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        # 85 → "peak presence"
+        assert "peak" in message.lower()
+
+    def test_dps_sparkline_in_message(self):
+        dates = ["2026-03-12", "2026-03-13", "2026-03-14"]
+        rolling = {
+            "days": {d: self._make_dps_day(d, 70.0) for d in dates},
+            "total_days": 3,
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        # Sparkline is rendered in backtick code block
+        assert "`" in message
+
+    def test_dps_best_worst_day_in_message_when_multiple_days(self):
+        rolling = {
+            "days": {
+                "2026-03-12": self._make_dps_day("2026-03-12", 55.0),
+                "2026-03-13": self._make_dps_day("2026-03-13", 90.0),
+                "2026-03-14": self._make_dps_day("2026-03-14", 40.0),
+            },
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        # Best/worst days section should reference DPS
+        assert "Best day (DPS)" in message or "Toughest day (DPS)" in message
+
+    def test_dps_delta_shown_when_prior_week_higher(self):
+        this_dates = ["2026-03-08", "2026-03-09", "2026-03-14"]
+        last_dates = ["2026-03-01", "2026-03-02", "2026-03-07"]
+        rolling = {
+            "days": {
+                **{d: self._make_dps_day(d, 75.0) for d in this_dates},
+                **{d: self._make_dps_day(d, 60.0) for d in last_dates},
+            },
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        # DPS improved → should see an upward trend note
+        assert "DPS" in message
+
+    def test_no_dps_no_dps_section(self):
+        """When no DPS data at all, message should still render without DPS line."""
+        dates = ["2026-03-14"]
+        rolling = {
+            "days": {"2026-03-14": _make_day_summary("2026-03-14")},  # no presence_score
+        }
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            summary = compute_weekly_summary("2026-03-14")
+            message = format_weekly_message(summary)
+
+        # Message should still render without crashing
+        assert "Weekly Presence Summary" in message

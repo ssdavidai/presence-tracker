@@ -566,11 +566,34 @@ def compute_digest(windows: list[dict]) -> dict:
         omi_total_sessions = sum(
             (w.get("omi") or {}).get("sessions_count", 0) for w in omi_active_windows
         )
+        # v10.1: topic breakdown from v10.0 Omi topic classifier.
+        # Aggregates category counts and mean cognitive density across
+        # all active conversation windows.  Gracefully absent when topic
+        # fields are not present in the JSONL (older data or no classifier).
+        from collections import Counter as _Counter
+        _cat_counts: _Counter = _Counter()
+        _density_vals: list[float] = []
+        for _w in omi_active_windows:
+            _omi = _w.get("omi", {})
+            _cat = _omi.get("topic_category") or _omi.get("category")
+            if _cat and _cat not in ("unknown", None):
+                _cat_counts[_cat] += 1
+            _d = _omi.get("cognitive_density")
+            if _d is not None:
+                _density_vals.append(float(_d))
+
+        _dominant = _cat_counts.most_common(1)[0][0] if _cat_counts else None
+        _mean_density = round(sum(_density_vals) / len(_density_vals), 3) if _density_vals else None
+
         omi_digest: Optional[dict] = {
             "conversation_windows": len(omi_active_windows),
             "total_sessions": omi_total_sessions,
             "total_words": omi_total_words,
             "total_speech_minutes": round(omi_total_speech_secs / 60.0, 1),
+            # v10.1 topic fields (None when topic classifier data unavailable)
+            "dominant_topic": _dominant,
+            "category_counts": dict(_cat_counts) if _cat_counts else None,
+            "mean_cognitive_density": _mean_density,
         }
     else:
         omi_digest = None
@@ -1037,6 +1060,48 @@ def format_digest_message(digest: dict) -> str:
 
         if omi_parts:
             lines.append("_🎙 " + "  ·  ".join(omi_parts) + "_")
+
+        # v10.1: Topic context line — shows what type of conversations happened.
+        # Surfaces the topic classifier output that's been stored since v10.0.
+        # Example: "_Topic: Technical (density 72%)_"
+        # Only shown when topic data is available (post-v10.0 JSONL files).
+        _TOPIC_EMOJI = {
+            "work_technical": "⚙️",
+            "work_strategic": "🎯",
+            "personal":        "🏠",
+            "operational":     "📦",
+            "mixed":           "🔀",
+        }
+        _TOPIC_LABEL = {
+            "work_technical": "Technical",
+            "work_strategic": "Strategic",
+            "personal":        "Personal",
+            "operational":     "Operational",
+            "mixed":           "Mixed",
+        }
+        dominant_topic = omi.get("dominant_topic")
+        mean_density = omi.get("mean_cognitive_density")
+        category_counts = omi.get("category_counts")
+
+        if dominant_topic:
+            emoji = _TOPIC_EMOJI.get(dominant_topic, "💬")
+            label = _TOPIC_LABEL.get(dominant_topic, dominant_topic.replace("_", " ").title())
+            topic_parts = [f"{emoji} {label}"]
+            if mean_density is not None:
+                topic_parts.append(f"density {mean_density:.0%}")
+            # If multiple categories, show the split
+            if category_counts and len(category_counts) > 1:
+                total_cat = sum(category_counts.values())
+                dominant_pct = round(100.0 * category_counts[dominant_topic] / total_cat)
+                if dominant_pct < 80:  # Only mention split when meaningful
+                    other_cats = [
+                        _TOPIC_LABEL.get(c, c.replace("_", " ").title())
+                        for c in category_counts
+                        if c != dominant_topic
+                    ]
+                    if other_cats:
+                        topic_parts.append(f"+ {', '.join(other_cats[:2]).lower()}")
+            lines.append("_" + "  ·  ".join(topic_parts) + "_")
 
     # ── Peak focus hour (v1.6) ─────────────────────────────────────────────
     # Surface the single best focus hour of the day — useful for scheduling.

@@ -23,12 +23,29 @@ Output:
 
 Architecture:
     1. Load daily summaries for the current and prior week from rolling.json
-    2. Compute aggregates: mean CLS, FDI, SDI, CSC, RAS + WHOOP stats
+    2. Compute aggregates: mean CLS, FDI, SDI, CSC, RAS + WHOOP stats, DPS
     3. Compute week-over-week deltas (Δ with direction arrows)
-    4. Identify best/worst day by CLS and by FDI
+    4. Identify best/worst day by DPS, CLS and by FDI
     5. Compute source coverage (how many days had WHOOP, Omi, RescueTime)
     6. Format a Slack-ready message
     7. Send as DM to David
+
+v1.1 — DPS integration:
+    Daily Presence Score (DPS) is now tracked in the weekly summary.
+    DPS is the single composite 0–100 score that distils the full week
+    into one number — analogous to WHOOP's weekly strain trend.
+
+    Changes:
+    - load_week_data() extracts DPS from rolling.json (presence_score.dps)
+      with a real-time fallback: if DPS is absent from the summary (older
+      ingestion runs pre-DPS, or DPS computation failed), it recomputes
+      from the JSONL windows on the fly so the weekly summary always has it.
+    - dps_per_day list (one DPS per date, None for missing days) enables
+      a 7-char sparkline in the Slack message showing the week's arc.
+    - dps_extremes: best and worst day by DPS (distinct from CLS extremes).
+    - compute_weekly_summary() adds DPS avg and week-over-week DPS delta.
+    - format_weekly_message() surfaces DPS as the headline composite with
+      sparkline, week avg, and week-over-week trend direction.
 """
 
 import argparse
@@ -46,6 +63,60 @@ sys.path.insert(0, str(project_root))
 
 from config import GATEWAY_URL, GATEWAY_TOKEN, SLACK_DM_CHANNEL
 from engine.store import read_summary, list_available_dates, read_day
+
+
+# ─── DPS helpers ──────────────────────────────────────────────────────────────
+
+def _extract_dps(day_record: dict) -> Optional[float]:
+    """
+    Extract DPS from a rolling-summary day record.
+
+    Primary: presence_score.dps (written by enrich_summary_with_dps() since v1.6)
+    Fallback: recompute from JSONL windows so that older days (pre-DPS) still
+              show a score in the weekly summary without requiring a re-ingest.
+
+    Returns a float 0–100, or None if computation fails.
+    """
+    # Primary path: already computed and stored in rolling.json
+    stored_dps = day_record.get("presence_score", {}).get("dps")
+    if stored_dps is not None:
+        return round(stored_dps, 1)
+
+    # Fallback: read JSONL and recompute
+    date_str = day_record.get("date")
+    if not date_str:
+        return None
+    try:
+        from engine.store import read_day as _read_day
+        from analysis.presence_score import compute_presence_score
+        windows = _read_day(date_str)
+        if not windows:
+            return None
+        score = compute_presence_score(windows)
+        return round(score.dps, 1) if score.dps is not None else None
+    except Exception:
+        return None
+
+
+def _dps_sparkline(dps_per_day: list[Optional[float]]) -> str:
+    """
+    Build a 7-char Unicode sparkline from a list of DPS values (0–100).
+
+    Higher DPS = better cognitive day.  Uses block chars ▁▂▃▄▅▆▇█.
+    Missing days (None) shown as '·'.
+
+    Returns a string like "▅▆▇▃▄▅▆" — one char per day.
+    """
+    BLOCKS = " ▁▂▃▄▅▆▇█"
+    chars = []
+    for val in dps_per_day:
+        if val is None:
+            chars.append("·")
+        else:
+            # Map 0–100 → 1–8 (index into BLOCKS[1:9])
+            idx = max(1, min(8, int(val / 100 * 8) + 1))
+            chars.append(BLOCKS[idx])
+    return "".join(chars)
 
 
 # ─── Aggregation helpers ──────────────────────────────────────────────────────
@@ -138,6 +209,29 @@ def load_week_data(end_date_str: str) -> dict:
         "ras": _avg_metric("recovery_alignment_score"),
         "active_fdi": _mean([r.get("focus_quality", {}).get("active_fdi") for r in day_records]),
     }
+
+    # ── DPS (Daily Presence Score) per day and weekly aggregate ──────────────
+    # One DPS per date in the window — None for days without data.
+    # Extracted from rolling summary (or recomputed from JSONL as fallback).
+    date_to_record = {r["date"]: r for r in day_records}
+    dps_per_day: list[Optional[float]] = []
+    for d in dates:
+        rec = date_to_record.get(d)
+        dps_per_day.append(_extract_dps(rec) if rec else None)
+
+    dps_values = [v for v in dps_per_day if v is not None]
+    dps_avg = round(sum(dps_values) / len(dps_values), 1) if dps_values else None
+
+    # Best / worst day by DPS (higher = better)
+    dps_pairs = [(dates[i], dps_per_day[i]) for i in range(len(dates)) if dps_per_day[i] is not None]
+    dps_extremes: dict = {"best": None, "worst": None}
+    if dps_pairs:
+        best_d, best_v = max(dps_pairs, key=lambda x: x[1])
+        worst_d, worst_v = min(dps_pairs, key=lambda x: x[1])
+        dps_extremes = {
+            "best": {"date": best_d, "value": best_v},
+            "worst": {"date": worst_d, "value": worst_v},
+        }
 
     # ── WHOOP averages ────────────────────────────────────────────────────────
     def _avg_whoop(key: str) -> Optional[float]:
@@ -254,6 +348,9 @@ def load_week_data(end_date_str: str) -> dict:
         "whoop": whoop,
         "cls_extremes": cls_extremes,
         "fdi_extremes": fdi_extremes,
+        "dps_avg": dps_avg,
+        "dps_per_day": dps_per_day,
+        "dps_extremes": dps_extremes,
         "peak_focus_hour": peak_focus_hour_mode,
         "source_coverage": source_days,
         "omi_stats": omi_stats,
@@ -299,12 +396,16 @@ def compute_weekly_summary(end_date_str: str) -> dict:
         for k in ["recovery", "hrv", "sleep_hours", "sleep_performance"]:
             whoop_deltas[k] = _delta(tw_w.get(k), lw_w.get(k))
 
+    # ── DPS delta (week-over-week composite score) ────────────────────────────
+    dps_delta = _delta(this_week.get("dps_avg"), last_week.get("dps_avg"))
+
     return {
         "end_date": end_date_str,
         "this_week": this_week,
         "last_week": last_week,
         "deltas": deltas,
         "whoop_deltas": whoop_deltas,
+        "dps_delta": dps_delta,
     }
 
 
@@ -366,6 +467,20 @@ def _hour_label(hour: Optional[int]) -> str:
     return f"{h12}{suffix}"
 
 
+def _dps_tier_label(dps: float) -> str:
+    """Human-readable tier label for a DPS score (0–100)."""
+    if dps >= 80:
+        return "peak presence 🟢"
+    elif dps >= 65:
+        return "strong 🔵"
+    elif dps >= 50:
+        return "moderate 🟡"
+    elif dps >= 35:
+        return "stretched 🟠"
+    else:
+        return "recovery needed 🔴"
+
+
 def format_weekly_message(summary: dict) -> str:
     """Format the weekly summary as a Slack-ready DM message."""
     tw = summary.get("this_week", {})
@@ -394,6 +509,24 @@ def format_weekly_message(summary: dict) -> str:
     if not tw_m:
         lines.append("No presence data for this week.")
         return "\n".join(lines)
+
+    # ── DPS headline ──────────────────────────────────────────────────────────
+    # DPS is the primary composite metric — surfaces here as the weekly headline.
+    tw_dps = tw.get("dps_avg")
+    dps_delta = summary.get("dps_delta")
+    dps_per_day = tw.get("dps_per_day", [])
+    dps_spark = _dps_sparkline(dps_per_day) if dps_per_day else ""
+
+    if tw_dps is not None:
+        dps_tier = _dps_tier_label(tw_dps)
+        dps_delta_str = ""
+        if dps_delta is not None and abs(dps_delta) >= 1.0:
+            arrow = "↑" if dps_delta > 0 else "↓"
+            sign = "+" if dps_delta > 0 else "−"
+            dps_delta_str = f"  {arrow} {sign}{abs(round(dps_delta, 1))} vs last week"
+        spark_str = f"  `{dps_spark}`" if dps_spark else ""
+        lines.append(f"*DPS: {round(tw_dps)}/100* — {dps_tier}{dps_delta_str}{spark_str}")
+        lines.append("")
 
     # ── Core metrics ──────────────────────────────────────────────────────────
     lines.append("*Core Metrics (working hours avg)*")
@@ -445,10 +578,26 @@ def format_weekly_message(summary: dict) -> str:
     # ── Best / worst days ─────────────────────────────────────────────────────
     cls_ext = tw.get("cls_extremes", {})
     fdi_ext = tw.get("fdi_extremes", {})
-    has_extremes = cls_ext.get("best") or fdi_ext.get("best")
+    dps_ext = tw.get("dps_extremes", {})
+    has_extremes = cls_ext.get("best") or fdi_ext.get("best") or dps_ext.get("best")
     if has_extremes:
         lines.append("")
         lines.append("*Best & Worst Days*")
+
+        # DPS extremes shown first — it's the primary composite signal
+        if dps_ext.get("best"):
+            best_dps = dps_ext["best"]
+            lines.append(
+                f"• Best day (DPS):     {_day_label(best_dps['date'])} "
+                f"({round(best_dps['value'])}/100)"
+            )
+        if dps_ext.get("worst") and dps_ext.get("best") and \
+                dps_ext["worst"]["date"] != dps_ext["best"]["date"]:
+            worst_dps = dps_ext["worst"]
+            lines.append(
+                f"• Toughest day (DPS): {_day_label(worst_dps['date'])} "
+                f"({round(worst_dps['value'])}/100)"
+            )
 
         if cls_ext.get("worst") and cls_ext.get("best"):
             worst_cls = cls_ext["worst"]
@@ -518,6 +667,13 @@ def format_weekly_message(summary: dict) -> str:
         lines.append("")
         lines.append("*vs Prior Week*")
         trend_parts = []
+
+        # DPS delta first — the headline composite
+        dps_d = summary.get("dps_delta")
+        if dps_d is not None and abs(dps_d) >= 2.0:
+            direction = "up" if dps_d > 0 else "down"
+            sign = "+" if dps_d > 0 else "−"
+            trend_parts.append(f"DPS {sign}{abs(round(dps_d, 1))} pts ({direction})")
 
         cls_d = deltas.get("cls")
         if cls_d is not None and abs(cls_d) >= 0.02:
