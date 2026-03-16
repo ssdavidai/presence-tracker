@@ -1,5 +1,5 @@
 """
-Presence Tracker — Daily HTML Dashboard (v4)
+Presence Tracker — Daily HTML Dashboard (v11)
 
 Generates a self-contained HTML file for a given day:
   data/dashboard/YYYY-MM-DD.html
@@ -9,6 +9,20 @@ Charts (pure SVG — no CDN, no external dependencies):
   - Metric bars: FDI, SDI, CSC, RAS as horizontal progress bars
   - Hourly heatmap: intensity grid over working hours
   - WHOOP recovery panel: recovery %, HRV, sleep
+
+v11 — DPS + CDI hero section:
+  The dashboard now leads with the two most important composite scores:
+    - DPS (Daily Presence Score, 0-100): "How was my cognitive day overall?"
+      Weighted blend of all 5 metrics. The single number that answers whether
+      today was a peak day or a difficult one. Shown with tier label and
+      colour-coded score ring.
+    - CDI (Cognitive Debt Index, 0-100): "How much accumulated fatigue am I carrying?"
+      14-day rolling fatigue accumulation. Higher = more debt. Shown with
+      tier label (surplus / balanced / loading / fatigued / critical).
+  These appear as a hero "Today's Score" card immediately after the header —
+  before the recovery panel — because they are the most actionable summary.
+  Both scores are computed lazily; if data is insufficient they degrade
+  gracefully with a neutral placeholder rather than crashing.
 
 The output is a single HTML file that opens directly in any browser.
 It embeds all CSS and JS inline — suitable for archiving or attaching to Slack.
@@ -59,6 +73,66 @@ def _recovery_colour(pct: float) -> str:
         return "#facc15"   # yellow
     else:
         return "#f87171"   # red
+
+
+def _dps_colour(score: float) -> str:
+    """Map DPS 0-100 to a hex colour: red → amber → green."""
+    if score >= 80:
+        return "#4ade80"   # green — exceptional / strong
+    elif score >= 60:
+        return "#60a5fa"   # blue — moderate
+    elif score >= 40:
+        return "#facc15"   # yellow — light
+    else:
+        return "#f87171"   # red — difficult
+
+
+def _cdi_colour(tier: str) -> str:
+    """Map CDI tier to a hex colour."""
+    return {
+        "surplus": "#4ade80",    # green — fully recovered
+        "balanced": "#60a5fa",   # blue — sustainable
+        "loading": "#facc15",    # yellow — accumulating
+        "fatigued": "#fb923c",   # orange — high debt
+        "critical": "#f87171",   # red — burnout risk
+    }.get(tier, "#94a3b8")
+
+
+def _svg_score_ring(score: float, colour: str, size: int = 90) -> str:
+    """
+    Build a circular SVG progress ring for a 0-100 score.
+
+    Args:
+        score: 0–100 value
+        colour: hex colour for the ring arc
+        size: outer diameter in px (default 90)
+
+    Returns:
+        SVG element string (inline, no viewBox attribute — sized by width/height).
+    """
+    radius = (size - 10) // 2   # ring inside the SVG with 5px padding each side
+    cx = cy = size // 2
+    circumference = 2 * math.pi * radius
+    # Clamp score to [0, 100]
+    pct = max(0.0, min(100.0, score)) / 100.0
+    filled = circumference * pct
+    gap = circumference - filled
+
+    return (
+        f'<svg width="{size}" height="{size}" style="display:block;flex-shrink:0">'
+        # Background ring
+        f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="#2a2d3e" stroke-width="6"/>'
+        # Foreground arc — starts at top (rotate -90°)
+        f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none"'
+        f' stroke="{colour}" stroke-width="6"'
+        f' stroke-dasharray="{filled:.1f} {gap:.1f}"'
+        f' stroke-linecap="round"'
+        f' transform="rotate(-90 {cx} {cy})"/>'
+        # Score label inside ring
+        f'<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central"'
+        f' font-size="18" font-weight="700" fill="{colour}">{score:.0f}</text>'
+        f'</svg>'
+    )
 
 
 # ─── SVG chart builders ───────────────────────────────────────────────────────
@@ -260,6 +334,50 @@ def generate_dashboard(date_str: str, output_path: Optional[Path] = None) -> Pat
     slack_sent = act.get("slack_sent", 0)
     slack_recv = act.get("slack_received", 0)
 
+    # ── DPS — Daily Presence Score ───────────────────────────────────────────
+    dps_score: Optional[float] = None
+    dps_tier: str = ""
+    dps_label: str = ""
+    try:
+        from analysis.presence_score import compute_presence_score
+        ps = compute_presence_score(windows)
+        dps_score = ps.dps
+        dps_tier = ps.tier
+        # Human-readable tier labels (mirrors _dps_tier() in presence_score.py)
+        _dps_tier_labels = {
+            "exceptional": "Exceptional",
+            "strong": "Strong",
+            "good": "Good",
+            "moderate": "Moderate",
+            "low": "Low",
+            "poor": "Poor",
+        }
+        dps_label = _dps_tier_labels.get(dps_tier, dps_tier.title())
+    except Exception:
+        pass
+
+    # ── CDI — Cognitive Debt Index ────────────────────────────────────────────
+    cdi_score: Optional[float] = None
+    cdi_tier: str = ""
+    cdi_label: str = ""
+    cdi_meaningful: bool = False
+    try:
+        from analysis.cognitive_debt import compute_cdi
+        debt = compute_cdi(date_str)
+        cdi_score = debt.cdi
+        cdi_tier = debt.tier
+        cdi_meaningful = debt.is_meaningful
+        _cdi_tier_labels = {
+            "surplus": "Surplus",
+            "balanced": "Balanced",
+            "loading": "Loading",
+            "fatigued": "Fatigued",
+            "critical": "Critical",
+        }
+        cdi_label = _cdi_tier_labels.get(cdi_tier, cdi_tier.title())
+    except Exception:
+        pass
+
     # ── Format date label ──
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
@@ -372,6 +490,63 @@ def generate_dashboard(date_str: str, output_path: Optional[Path] = None) -> Pat
     <strong>{ph:02d}:{pm:02d}</strong> — CLS {pcls:.0%}
     {"· " + ptitle if ptitle else ""}
   </p>
+</div>"""
+
+    # ── DPS + CDI hero card ───────────────────────────────────────────────────
+    hero_html = ""
+    dps_ring_html = ""
+    cdi_ring_html = ""
+
+    if dps_score is not None:
+        dps_col = _dps_colour(dps_score)
+        dps_ring_html = _svg_score_ring(dps_score, dps_col, size=90)
+        dps_block = f"""
+    <div class="score-item">
+      {dps_ring_html}
+      <div class="score-meta">
+        <div class="score-title">Daily Presence Score</div>
+        <div class="score-tier" style="color:{dps_col}">{dps_label}</div>
+        <div class="score-desc">Cognitive day quality</div>
+      </div>
+    </div>"""
+    else:
+        dps_block = '<div class="score-item score-na"><div class="score-title">DPS</div><div class="score-desc">Not enough data</div></div>'
+
+    if cdi_score is not None and cdi_meaningful:
+        cdi_col = _cdi_colour(cdi_tier)
+        cdi_ring_html = _svg_score_ring(cdi_score, cdi_col, size=90)
+        cdi_block = f"""
+    <div class="score-item">
+      {cdi_ring_html}
+      <div class="score-meta">
+        <div class="score-title">Cognitive Debt Index</div>
+        <div class="score-tier" style="color:{cdi_col}">{cdi_label}</div>
+        <div class="score-desc">14-day fatigue balance</div>
+      </div>
+    </div>"""
+    elif cdi_score is not None:
+        # Have a score but not yet meaningful — show greyed out
+        cdi_col = "#94a3b8"
+        cdi_ring_html = _svg_score_ring(cdi_score, cdi_col, size=90)
+        cdi_block = f"""
+    <div class="score-item">
+      {cdi_ring_html}
+      <div class="score-meta">
+        <div class="score-title">Cognitive Debt Index</div>
+        <div class="score-tier" style="color:{cdi_col}">Warming up</div>
+        <div class="score-desc">Need ≥3 days of data</div>
+      </div>
+    </div>"""
+    else:
+        cdi_block = '<div class="score-item score-na"><div class="score-title">CDI</div><div class="score-desc">Not enough data</div></div>'
+
+    hero_html = f"""
+<div class="card hero-card">
+  <h2>🎯 Today's Scores</h2>
+  <div class="score-grid">
+    {dps_block}
+    {cdi_block}
+  </div>
 </div>"""
 
     # ── Full HTML template ──
@@ -492,6 +667,31 @@ def generate_dashboard(date_str: str, output_path: Optional[Path] = None) -> Pat
   svg {{ display: block; }}
   .peak-text {{ font-size: 0.95rem; }}
   footer {{ text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 32px; }}
+  /* DPS + CDI hero card */
+  .hero-card {{ margin-bottom: 16px; }}
+  .score-grid {{
+    display: flex;
+    gap: 40px;
+    flex-wrap: wrap;
+    align-items: center;
+    padding-top: 4px;
+  }}
+  .score-item {{
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }}
+  .score-item.score-na {{
+    color: var(--muted);
+    font-size: 0.88rem;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+  }}
+  .score-meta {{ display: flex; flex-direction: column; gap: 3px; }}
+  .score-title {{ font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }}
+  .score-tier {{ font-size: 1.0rem; font-weight: 700; }}
+  .score-desc {{ font-size: 0.75rem; color: var(--muted); }}
 </style>
 </head>
 <body>
@@ -500,6 +700,9 @@ def generate_dashboard(date_str: str, output_path: Optional[Path] = None) -> Pat
 <p class="subtitle">{date_label}</p>
 
 {trend_html}
+
+<!-- DPS + CDI hero scores -->
+{hero_html}
 
 <!-- Recovery + Activity row -->
 <div class="grid-2">

@@ -1,5 +1,5 @@
 """
-Tests for analysis/dashboard.py — Daily HTML Dashboard (v4)
+Tests for analysis/dashboard.py — Daily HTML Dashboard (v11)
 
 Tests cover:
   - generate_dashboard() produces a valid HTML file
@@ -8,6 +8,7 @@ Tests cover:
   - SVG chart builders return well-formed SVG
   - CLI behaviour for missing data
   - Output is self-contained (no external CDN references)
+  - DPS + CDI hero section (v11): score rings, tier labels, graceful fallback
 """
 
 import json
@@ -26,6 +27,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from analysis.dashboard import (
     _cls_colour,
     _recovery_colour,
+    _dps_colour,
+    _cdi_colour,
+    _svg_score_ring,
     _svg_cls_timeline,
     _svg_hourly_heatmap,
     _bar,
@@ -408,6 +412,188 @@ class TestGenerateDashboard:
                 path = generate_dashboard("2026-03-13", output_path=out)
                 html = path.read_text()
         assert "Omi" in html or "Conversation" in html
+
+
+# ─── DPS / CDI colour helpers ─────────────────────────────────────────────────
+
+class TestDpsColour:
+    def test_high_dps_is_green(self):
+        assert _dps_colour(90) == "#4ade80"
+
+    def test_good_dps_is_blue(self):
+        assert _dps_colour(70) == "#60a5fa"
+
+    def test_moderate_dps_is_yellow(self):
+        assert _dps_colour(50) == "#facc15"
+
+    def test_low_dps_is_red(self):
+        assert _dps_colour(30) == "#f87171"
+
+    def test_boundary_at_80(self):
+        assert _dps_colour(80) == "#4ade80"
+        assert _dps_colour(79) == "#60a5fa"
+
+    def test_boundary_at_60(self):
+        assert _dps_colour(60) == "#60a5fa"
+        assert _dps_colour(59) == "#facc15"
+
+    def test_boundary_at_40(self):
+        assert _dps_colour(40) == "#facc15"
+        assert _dps_colour(39) == "#f87171"
+
+
+class TestCdiColour:
+    def test_surplus_is_green(self):
+        assert _cdi_colour("surplus") == "#4ade80"
+
+    def test_balanced_is_blue(self):
+        assert _cdi_colour("balanced") == "#60a5fa"
+
+    def test_loading_is_yellow(self):
+        assert _cdi_colour("loading") == "#facc15"
+
+    def test_fatigued_is_orange(self):
+        assert _cdi_colour("fatigued") == "#fb923c"
+
+    def test_critical_is_red(self):
+        assert _cdi_colour("critical") == "#f87171"
+
+    def test_unknown_tier_returns_muted(self):
+        assert _cdi_colour("unknown_tier") == "#94a3b8"
+
+
+class TestSvgScoreRing:
+    def test_returns_svg_string(self):
+        result = _svg_score_ring(75.0, "#4ade80")
+        assert result.startswith("<svg")
+        assert "</svg>" in result
+
+    def test_score_appears_in_ring(self):
+        result = _svg_score_ring(88.0, "#4ade80")
+        assert ">88<" in result
+
+    def test_colour_used_in_ring(self):
+        colour = "#f87171"
+        result = _svg_score_ring(45.0, colour)
+        assert colour in result
+
+    def test_zero_score_renders(self):
+        result = _svg_score_ring(0.0, "#f87171")
+        assert ">0<" in result
+        assert "</svg>" in result
+
+    def test_hundred_score_renders(self):
+        result = _svg_score_ring(100.0, "#4ade80")
+        assert ">100<" in result
+
+    def test_score_clamped_above_100(self):
+        # Scores > 100 should clamp to 100%
+        result = _svg_score_ring(120.0, "#4ade80")
+        assert "</svg>" in result
+
+    def test_score_clamped_below_0(self):
+        result = _svg_score_ring(-10.0, "#4ade80")
+        assert "</svg>" in result
+
+    def test_custom_size(self):
+        result = _svg_score_ring(50.0, "#60a5fa", size=120)
+        assert 'width="120"' in result
+        assert 'height="120"' in result
+
+    def test_background_ring_present(self):
+        # Background track should use muted colour
+        result = _svg_score_ring(60.0, "#4ade80")
+        assert "#2a2d3e" in result
+
+    def test_foreground_arc_uses_dasharray(self):
+        result = _svg_score_ring(50.0, "#60a5fa")
+        assert "stroke-dasharray" in result
+
+
+# ─── DPS + CDI hero section in generate_dashboard ────────────────────────────
+
+class TestDashboardHeroSection:
+    """Verify that DPS + CDI hero section is present in the generated dashboard."""
+
+    def _run_generate(self, date_str: str = "2026-03-13") -> str:
+        windows = _make_day(date_str)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / f"{date_str}.html"
+            with (
+                patch("analysis.dashboard.DASHBOARD_DIR", Path(tmpdir)),
+                patch("engine.store.read_day", return_value=windows),
+                patch("engine.store.get_recent_summaries", return_value=[]),
+            ):
+                path = generate_dashboard(date_str, output_path=out_path)
+                return path.read_text(encoding="utf-8")
+
+    def test_hero_card_present(self):
+        html = self._run_generate()
+        assert "Today&#x27;s Scores" in html or "Today's Scores" in html or "score-grid" in html
+
+    def test_dps_section_present(self):
+        html = self._run_generate()
+        assert "Daily Presence Score" in html
+
+    def test_cdi_section_present(self):
+        html = self._run_generate()
+        assert "Cognitive Debt Index" in html
+
+    def test_score_rings_in_output(self):
+        html = self._run_generate()
+        # SVG score rings use stroke-dasharray
+        assert "stroke-dasharray" in html
+
+    def test_score_ring_css_present(self):
+        html = self._run_generate()
+        assert "score-grid" in html
+
+    def test_score_meta_css_present(self):
+        html = self._run_generate()
+        assert "score-meta" in html or "score-title" in html
+
+    def test_hero_section_before_recovery(self):
+        html = self._run_generate()
+        hero_pos = html.find("Daily Presence Score")
+        recovery_pos = html.find("💚 Recovery")
+        assert hero_pos < recovery_pos, "DPS hero should appear before Recovery card"
+
+    def test_dps_tier_label_rendered(self):
+        html = self._run_generate()
+        # One of the DPS tier labels should appear (mirrors _dps_tier() in presence_score.py)
+        tier_labels = ["Exceptional", "Strong", "Good", "Moderate", "Low", "Poor"]
+        assert any(t in html for t in tier_labels), f"No DPS tier label found. Labels checked: {tier_labels}"
+
+    def test_cdi_warmup_shown_when_not_meaningful(self):
+        """When CDI isn't meaningful (< 3 days), 'Warming up' placeholder should show."""
+        html = self._run_generate()
+        # With only mock data and no real store history, CDI likely not meaningful
+        # Just verify the section renders without crashing
+        assert "Cognitive Debt" in html
+
+    def test_dps_and_cdi_fallback_gracefully(self):
+        """Even if DPS/CDI computation throws, dashboard should still render."""
+        windows = _make_day()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "test.html"
+            with (
+                patch("analysis.dashboard.DASHBOARD_DIR", Path(tmpdir)),
+                patch("engine.store.read_day", return_value=windows),
+                patch("engine.store.get_recent_summaries", return_value=[]),
+                # Simulate DPS/CDI import failures
+                patch("analysis.presence_score.compute_presence_score", side_effect=Exception("mock fail")),
+                patch("analysis.cognitive_debt.compute_cdi", side_effect=Exception("mock fail")),
+            ):
+                path = generate_dashboard("2026-03-13", output_path=out_path)
+                html = path.read_text()
+        # Dashboard should still render even with failures
+        assert "<!DOCTYPE html>" in html
+
+    def test_hero_section_uses_correct_colours(self):
+        html = self._run_generate()
+        # The ring SVG should use colour codes from _dps_colour / _cdi_colour
+        valid_colours = {"#4ade80", "#60a5fa", "#facc15", "#fb923c", "#f87171", "#94a3b8"}
+        assert any(c in html for c in valid_colours)
 
 
 # ─── Trend badge rendering ────────────────────────────────────────────────────

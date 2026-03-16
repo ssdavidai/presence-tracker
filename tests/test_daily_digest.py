@@ -1222,3 +1222,180 @@ class TestPeakFocusHourInComputeDigest:
         digest = compute_digest(windows)
         assert "peak_focus_hour" in digest
         assert "peak_focus_fdi" in digest
+
+
+# ─── v1.9: Tomorrow's focus plan in nightly digest ───────────────────────────
+
+class TestTomorrowFocusPlanInDigest:
+    """Tests for the v1.9 tomorrow focus plan feature in the nightly digest."""
+
+    def test_compute_digest_includes_tomorrow_focus_plan_key(self):
+        """compute_digest always includes the tomorrow_focus_plan key."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        assert "tomorrow_focus_plan" in digest
+
+    def test_tomorrow_focus_plan_is_none_or_dict(self):
+        """tomorrow_focus_plan is either None or a dict."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        plan = digest["tomorrow_focus_plan"]
+        assert plan is None or isinstance(plan, dict)
+
+    def test_focus_plan_dict_has_expected_keys(self):
+        """When tomorrow_focus_plan is a dict, it has the required keys."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        plan = digest["tomorrow_focus_plan"]
+        if plan is not None:
+            assert "section" in plan
+            assert "is_meaningful" in plan
+            assert "block_count" in plan
+            assert "summary_line" in plan
+            assert "advisory" in plan
+
+    def test_focus_plan_does_not_crash_digest(self):
+        """Even when focus planner raises, compute_digest should succeed."""
+        from unittest.mock import patch
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        # Simulate a failing focus planner — digest must still compute
+        with patch("analysis.focus_planner.plan_tomorrow_focus", side_effect=Exception("mock fail")):
+            digest = compute_digest(windows)
+        assert "date" in digest
+        assert digest["tomorrow_focus_plan"] is None
+
+    def test_format_digest_with_meaningful_plan_shows_section(self):
+        """When plan is meaningful, format_digest_message includes the section."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        # Inject a mock meaningful plan
+        digest["tomorrow_focus_plan"] = {
+            "section": "*🎯 Tomorrow's Focus Plan:*\n• 9:00–11:00  _(120min, peak focus hour)_  🔥",
+            "summary_line": "One peak block available",
+            "advisory": "Front-load the harder task.",
+            "is_meaningful": True,
+            "block_count": 1,
+            "cdi_tier": "balanced",
+        }
+        msg = format_digest_message(digest)
+        assert "Tomorrow" in msg
+        assert "Focus Plan" in msg
+        assert "9:00" in msg
+
+    def test_format_digest_without_plan_omits_section(self):
+        """When tomorrow_focus_plan is None, no focus plan section is shown."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        digest["tomorrow_focus_plan"] = None
+        msg = format_digest_message(digest)
+        assert "Focus Plan" not in msg
+
+    def test_format_digest_with_not_meaningful_plan_omits_section(self):
+        """When plan.is_meaningful is False, the section is not shown."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        digest["tomorrow_focus_plan"] = {
+            "section": "",
+            "summary_line": "No data",
+            "advisory": "",
+            "is_meaningful": False,
+            "block_count": 0,
+            "cdi_tier": "balanced",
+        }
+        msg = format_digest_message(digest)
+        assert "Focus Plan" not in msg
+
+    def test_focus_plan_appears_after_insight(self):
+        """The focus plan section should appear after the insight line."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        digest["tomorrow_focus_plan"] = {
+            "section": "*🎯 Tomorrow's Focus Plan:*\n• 9:00–11:00  _(120min)_  🔥",
+            "summary_line": "One peak block",
+            "advisory": "Front-load.",
+            "is_meaningful": True,
+            "block_count": 1,
+            "cdi_tier": "balanced",
+        }
+        digest["insight"] = "Test insight text"
+        msg = format_digest_message(digest)
+        insight_pos = msg.find("Test insight text")
+        plan_pos = msg.find("Tomorrow's Focus Plan")
+        assert insight_pos != -1, "Insight not found in message"
+        assert plan_pos != -1, "Focus plan not found in message"
+        assert insight_pos < plan_pos, "Focus plan should appear after insight"
+
+    def test_no_duplicate_focus_plan_header(self):
+        """The header '*🎯 Tomorrow's Focus Plan:*' should appear exactly once."""
+        windows = build_windows(
+            date_str="2026-03-13",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+        digest = compute_digest(windows)
+        digest["tomorrow_focus_plan"] = {
+            "section": "*🎯 Tomorrow's Focus Plan:*\n• 9:00–11:00  _(120min)_  🔥",
+            "summary_line": "One peak block",
+            "advisory": "",
+            "is_meaningful": True,
+            "block_count": 1,
+            "cdi_tier": "balanced",
+        }
+        msg = format_digest_message(digest)
+        # Header must appear exactly once — format_focus_plan_section already includes it
+        count = msg.count("Tomorrow's Focus Plan")
+        assert count == 1, f"Header appeared {count} times, expected 1"
+
+    def test_compute_focus_plan_for_digest_is_importable(self):
+        """The _compute_focus_plan_for_digest function can be imported."""
+        from analysis.daily_digest import _compute_focus_plan_for_digest
+        assert callable(_compute_focus_plan_for_digest)
+
+    def test_compute_focus_plan_returns_none_on_exception(self):
+        """_compute_focus_plan_for_digest returns None when planner raises."""
+        from unittest.mock import patch
+        from analysis.daily_digest import _compute_focus_plan_for_digest
+        with patch("analysis.focus_planner.plan_tomorrow_focus", side_effect=RuntimeError("test")):
+            result = _compute_focus_plan_for_digest("2026-03-13")
+        assert result is None

@@ -63,6 +63,24 @@ v1.6 — Omi conversation digest + peak focus hour:
   Both additions use data already collected — no new API calls or collectors.
   Both degrade gracefully: if Omi has no data, the section is omitted;
   if no active windows exist, the peak focus line is omitted.
+
+v1.9 — Tomorrow's focus plan in the nightly digest:
+  The nightly digest now includes tomorrow's recommended focus blocks, mirroring
+  what the morning brief already shows.  Placing the plan in the *evening* digest
+  lets David mentally prepare the night before — he can adjust tomorrow's calendar
+  or set intentions before sleep, rather than discovering the plan in the morning.
+
+  The section is produced by the same focus_planner.plan_tomorrow_focus() call
+  used in the morning brief, formatted via format_focus_plan_section().
+
+  Example output in the digest:
+      🎯 *Tomorrow's Focus Plan:*
+      • 9:00–11:00  _(120min, peak focus hour)_  🔥
+      • 14:00–15:30  _(90min, strong focus hour)_  ✅
+      _Two clear blocks available — front-load the harder task in the earlier one._
+
+  Degrades gracefully: if calendar data or focus planner fails, the section is
+  silently omitted — it is never load-bearing for the rest of the digest.
 """
 
 import json
@@ -467,6 +485,33 @@ def _compute_dps_for_digest(windows: list[dict]) -> Optional[dict]:
         return None
 
 
+def _compute_focus_plan_for_digest(today_date_str: str) -> Optional[dict]:
+    """
+    Compute tomorrow's focus plan for the nightly digest (v1.9).
+
+    Mirrors the same call used by the morning brief, but placed in the
+    evening digest so David can mentally prepare the night before.
+
+    Returns a dict with serialised FocusPlan data, or None on error / no data.
+    Fully exception-isolated — never crashes the digest.
+    """
+    try:
+        from analysis.focus_planner import plan_tomorrow_focus, format_focus_plan_section
+        plan = plan_tomorrow_focus(today_date_str)
+        if plan is None:
+            return None
+        return {
+            "section": format_focus_plan_section(plan),
+            "summary_line": plan.summary_line,
+            "advisory": plan.advisory,
+            "is_meaningful": plan.is_meaningful,
+            "block_count": len(plan.recommended_blocks),
+            "cdi_tier": plan.cdi_tier,
+        }
+    except Exception:
+        return None
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -741,6 +786,9 @@ def compute_digest(windows: list[dict]) -> dict:
         # v1.8: Daily Presence Score — single 0–100 composite score
         # (None when insufficient working-hour windows)
         "presence_score": _compute_dps_for_digest(windows),
+        # v1.9: Tomorrow's focus plan — specific deep-work blocks for tomorrow
+        # (None when calendar unavailable or focus planner fails)
+        "tomorrow_focus_plan": _compute_focus_plan_for_digest(date_str),
     }
 
 
@@ -1159,6 +1207,17 @@ def format_digest_message(digest: dict) -> str:
     if insight:
         lines.append("")
         lines.append(f"💡 {insight}")
+
+    # ── Tomorrow's Focus Plan (v1.9) ──────────────────────────────────────
+    # Forward-looking: show recommended deep-work blocks for tomorrow so
+    # David can prepare tonight — adjust calendar, set intentions, go to sleep
+    # knowing when his best focus windows are.
+    # Only shown when the focus planner has meaningful data (calendar + history).
+    # Note: format_focus_plan_section() already includes the section header.
+    tomorrow_focus_plan = digest.get("tomorrow_focus_plan")
+    if tomorrow_focus_plan and tomorrow_focus_plan.get("is_meaningful") and tomorrow_focus_plan.get("section"):
+        lines.append("")
+        lines.append(tomorrow_focus_plan["section"])
 
     return "\n".join(lines)
 

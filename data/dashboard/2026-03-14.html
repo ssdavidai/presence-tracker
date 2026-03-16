@@ -115,6 +115,31 @@
   svg { display: block; }
   .peak-text { font-size: 0.95rem; }
   footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 32px; }
+  /* DPS + CDI hero card */
+  .hero-card { margin-bottom: 16px; }
+  .score-grid {
+    display: flex;
+    gap: 40px;
+    flex-wrap: wrap;
+    align-items: center;
+    padding-top: 4px;
+  }
+  .score-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .score-item.score-na {
+    color: var(--muted);
+    font-size: 0.88rem;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  .score-meta { display: flex; flex-direction: column; gap: 3px; }
+  .score-title { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .score-tier { font-size: 1.0rem; font-weight: 700; }
+  .score-desc { font-size: 0.75rem; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -123,6 +148,32 @@
 <p class="subtitle">Saturday, March 14, 2026</p>
 
 <div class="trend-badges"><span class="badge badge-amber">Load +38% vs baseline</span></div>
+
+<!-- DPS + CDI hero scores -->
+
+<div class="card hero-card">
+  <h2>🎯 Today's Scores</h2>
+  <div class="score-grid">
+    
+    <div class="score-item">
+      <svg width="90" height="90" style="display:block;flex-shrink:0"><circle cx="45" cy="45" r="40" fill="none" stroke="#2a2d3e" stroke-width="6"/><circle cx="45" cy="45" r="40" fill="none" stroke="#4ade80" stroke-width="6" stroke-dasharray="223.2 28.1" stroke-linecap="round" transform="rotate(-90 45 45)"/><text x="45" y="45" text-anchor="middle" dominant-baseline="central" font-size="18" font-weight="700" fill="#4ade80">89</text></svg>
+      <div class="score-meta">
+        <div class="score-title">Daily Presence Score</div>
+        <div class="score-tier" style="color:#4ade80">Exceptional</div>
+        <div class="score-desc">Cognitive day quality</div>
+      </div>
+    </div>
+    
+    <div class="score-item">
+      <svg width="90" height="90" style="display:block;flex-shrink:0"><circle cx="45" cy="45" r="40" fill="none" stroke="#2a2d3e" stroke-width="6"/><circle cx="45" cy="45" r="40" fill="none" stroke="#94a3b8" stroke-width="6" stroke-dasharray="109.8 141.5" stroke-linecap="round" transform="rotate(-90 45 45)"/><text x="45" y="45" text-anchor="middle" dominant-baseline="central" font-size="18" font-weight="700" fill="#94a3b8">44</text></svg>
+      <div class="score-meta">
+        <div class="score-title">Cognitive Debt Index</div>
+        <div class="score-tier" style="color:#94a3b8">Warming up</div>
+        <div class="score-desc">Need ≥3 days of data</div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Recovery + Activity row -->
 <div class="grid-2">
@@ -256,7 +307,7 @@
 </div>
 
 <footer>
-  Presence Tracker · Generated 2026-03-14 13:01 ·
+  Presence Tracker · Generated 2026-03-16 17:47 ·
   Data sources: whoop, calendar, slack
 </footer>
 
