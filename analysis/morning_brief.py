@@ -661,6 +661,13 @@ def compute_morning_brief(
         # Shows prediction vs actuals when the Random Forest predictor is trained.
         # Returns None when model not trained or yesterday has no data.
         "ml_recovery": _compute_ml_recovery_for_brief(today_date, whoop_data),
+        # v21.0: Sleep → Focus correlation insight — how does David's sleep quality
+        # predict his next-day cognitive performance, based on his own historical data?
+        # Shows a compact one-liner like: "😴 Sleep insight: each extra hour adds +6.2
+        # FDI points (r=+0.41, 21 nights)."  Only shows when ≥ 5 data-pairs exist.
+        # Personalises the recovery context with David's own statistical patterns.
+        # Returns None when insufficient data or on any error (graceful degradation).
+        "sleep_focus": _compute_sleep_focus_for_brief(today_date),
     }
 
 
@@ -946,6 +953,49 @@ def _compute_ml_recovery_for_brief(today_date: str, today_whoop: dict) -> Option
             "error": error,
             "confidence": confidence,
             "line": line,
+        }
+    except Exception:
+        return None
+
+
+def _compute_sleep_focus_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute the sleep-to-focus correlation insight for the morning brief.
+
+    Returns a dict with the top insight line and supporting stats, or None when
+    not meaningful (< MIN_PAIRS nights of data or on error).
+
+    v21.0: Added sleep-focus correlation to morning brief.
+
+    Why here: The morning brief already shows today's WHOOP recovery (the
+    *output* of last night's sleep).  Adding the sleep-focus insight makes
+    the connection explicit: "Your data shows that nights like last night
+    (7.1h, HRV 80ms) correlate with high FDI days."  This personalises the
+    physiological context with David's own statistical patterns — moving
+    beyond generic "sleep more" advice to "your data shows exactly how much
+    each extra hour is worth to you."
+
+    Placed last in the brief (below cognitive rhythm) so it doesn't compete
+    with the primary actionable signals but is available as a data-literacy
+    anchor for the motivated reader.
+    """
+    try:
+        from analysis.sleep_focus_correlator import (
+            compute_sleep_focus_correlation,
+            format_sleep_insight_line,
+        )
+        corr = compute_sleep_focus_correlation(as_of_date_str=date_str)
+        if not corr.is_meaningful:
+            return None
+        line = format_sleep_insight_line(corr)
+        if not line:
+            return None
+        return {
+            "line": line,
+            "pairs_used": corr.pairs_used,
+            "sleep_hours_slope": corr.sleep_hours_slope,
+            "r_sleep_fdi": corr.correlations.get("sleep_hours__next_day_fdi"),
+            "is_meaningful": True,
         }
     except Exception:
         return None
@@ -1278,6 +1328,18 @@ def format_morning_brief_message(brief: dict) -> str:
         if ml_line:
             lines.append("")
             lines.append(f"_{ml_line}_")
+
+    # ── Sleep → Focus Correlation (v21.0) ─────────────────────────────────
+    # Compact one-liner: how much each extra hour of sleep is worth in focus
+    # quality, derived from David's own historical data.
+    # Only shown when ≥ 5 (sleep_date, focus_date) pairs exist in the store.
+    # Example: "😴 Sleep insight: each extra hour adds +6.2 FDI points (r=+0.41)."
+    sleep_focus = brief.get("sleep_focus")
+    if sleep_focus and sleep_focus.get("is_meaningful"):
+        sf_line = sleep_focus.get("line", "")
+        if sf_line:
+            lines.append("")
+            lines.append(f"_{sf_line}_")
 
     return "\n".join(lines)
 

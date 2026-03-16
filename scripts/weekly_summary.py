@@ -711,6 +711,24 @@ def format_weekly_message(summary: dict) -> str:
     except Exception:
         pass  # rhythm is non-critical — never block the weekly summary
 
+    # ── Sleep → Focus correlation insight (v2.2) ──────────────────────────────
+    # Shows David the empirical relationship between his sleep quality and
+    # next-day cognitive performance, computed from all available JSONL history.
+    # Only surfaces when there are ≥ MIN_PAIRS (5) paired days of data.
+    # Degrades silently on error — never blocks the weekly summary.
+    try:
+        from analysis.sleep_focus_correlator import (
+            compute_sleep_focus_correlation,
+            format_sleep_insight_line,
+        )
+        sleep_corr = compute_sleep_focus_correlation(as_of_date_str=end_date_str)
+        sleep_line = format_sleep_insight_line(sleep_corr)
+        if sleep_line:
+            lines.append("")
+            lines.append(sleep_line)
+    except Exception:
+        pass  # sleep correlator is non-critical — never block the weekly summary
+
     lines.append("")
     lines.append("_Presence Tracker · weekly summary_")
 
