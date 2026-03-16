@@ -20,6 +20,7 @@ Usage:
 What it shows (full mode):
   - WHOOP physiological snapshot (recovery, HRV, sleep)
   - 5-metric summary bars (CLS, FDI, SDI, CSC, RAS)
+  - Cognitive Load Breakdown — what drove CLS today (meetings/Slack/physiology/RT/Omi)
   - Hourly CLS heatmap across the working day
   - Meeting timeline (calendar blocks)
   - Slack activity breakdown
@@ -468,6 +469,8 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "cognitive_debt": _compute_cdi_for_report(date_str),
         # Daily Cognitive Budget (v16) — quality hours available today
         "cognitive_budget": _compute_cognitive_budget_for_report(date_str, whoop),
+        # Cognitive Load Decomposer (v24) — what drove CLS today
+        "load_decomposition": _compute_load_decomposition_for_report(date_str),
     }
 
 
@@ -601,6 +604,45 @@ def _compute_cognitive_budget_for_report(date_str: str, whoop_data: dict) -> Opt
             "guidance": budget.guidance,
             "line": format_budget_line(budget),
             "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_load_decomposition_for_report(date_str: str) -> Optional[dict]:
+    """
+    Compute the Cognitive Load Decomposition for the terminal report.
+
+    Returns a dict with source shares, dominant source, and terminal block,
+    or None when no data exists or decomposition is not meaningful.
+
+    v25.0: Added to terminal report — shows *why* CLS was high/low.
+    """
+    try:
+        from analysis.load_decomposer import (
+            compute_load_decomposition,
+            format_decomposition_terminal,
+            format_decomposition_line,
+        )
+
+        decomp = compute_load_decomposition(date_str)
+        if not decomp.is_meaningful:
+            return None
+
+        return {
+            "total_cls_mean": decomp.total_cls_mean,
+            "active_cls_mean": decomp.active_cls_mean,
+            "source_shares": decomp.source_shares,
+            "source_cls": decomp.source_cls,
+            "dominant_source": decomp.dominant_source,
+            "insight_lines": decomp.insight_lines,
+            "windows_analysed": decomp.windows_analysed,
+            "active_windows": decomp.active_windows,
+            "is_meaningful": True,
+            # Pre-rendered terminal block
+            "terminal_block": format_decomposition_terminal(decomp),
+            # Compact one-liner for embedded use
+            "summary_line": format_decomposition_line(decomp),
         }
     except Exception:
         return None
@@ -821,6 +863,36 @@ def print_full(report: dict, show_windows: bool = False) -> None:
         if guidance:
             print(_c(f"  {guidance}", DIM))
         print()
+
+    # ── Cognitive Load Decomposition (v24/v25) ────────────────────────────────
+    # Shows what *drove* the CLS today — meetings, Slack, recovery deficit, etc.
+    # Only shown when CLS is meaningful (> 0.10 avg across active windows).
+    decomp_data = report.get("load_decomposition")
+    if decomp_data and decomp_data.get("is_meaningful") and decomp_data.get("terminal_block"):
+        # Only render when load was actually notable (avoids clutter on very quiet days)
+        if decomp_data.get("total_cls_mean", 0) >= 0.10:
+            print(_c("  🔍 Cognitive Load Breakdown", BOLD))
+            # Strip leading newline from terminal_block and indent it
+            block = decomp_data["terminal_block"].lstrip("\n")
+            for line in block.split("\n"):
+                # Remove the decomposer's own header (we already print the section label above)
+                if line.startswith("Cognitive Load Decomposition"):
+                    continue
+                if line.startswith("=" * 10):
+                    continue
+                print(f"  {line}")
+            print()
+        else:
+            # Quiet day — show the compact one-liner if load decomp is available
+            summary_line = decomp_data.get("summary_line", "")
+            if summary_line:
+                print(_c("  🔍 Cognitive Load Breakdown", BOLD))
+                # Strip markdown formatting and the leading emoji/label (already in header)
+                clean = summary_line.replace("*", "").replace("_", "")
+                # Remove leading "🔍 Load breakdown: " prefix since section header already says it
+                clean = clean.replace("🔍 Load breakdown: ", "").replace("🔍 Load breakdown:", "")
+                print(_c(f"  {clean}", DIM))
+                print()
 
     # ── Hourly Heatmap ────────────────────────────────────────────────────────
     print(_c("  ④ Cognitive Load — Hourly", BOLD))

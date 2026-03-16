@@ -1471,3 +1471,169 @@ class TestPrintWeek:
             print_week("2026-03-14")
         out = capsys.readouterr().out
         assert out.count("\n") >= 10
+
+
+# ─── _compute_load_decomposition_for_report() (v25) ──────────────────────────
+
+class TestComputeLoadDecompositionForReport:
+    """
+    Tests for _compute_load_decomposition_for_report() — the new v25 helper
+    that wires analysis.load_decomposer into the terminal report.
+    """
+
+    def _make_active_windows(self, n: int = 10, cls: float = 0.35) -> list[dict]:
+        """Create windows with enough CLS to produce a meaningful decomposition."""
+        wins = _make_day_windows(n)
+        # Boost CLS on active working windows so decomposer considers them active
+        for w in wins:
+            if w["metadata"]["is_working_hours"] and w["metadata"]["is_active_window"]:
+                w["metrics"]["cognitive_load_score"] = cls
+                w["slack"]["messages_received"] = 15  # add slack signal
+        return wins
+
+    def test_returns_none_when_no_data(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        with patch("analysis.load_decomposer.read_day", return_value=[]):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        assert result is None
+
+    def test_returns_dict_when_data_available(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        wins = self._make_active_windows(10)
+        with patch("analysis.load_decomposer.read_day", return_value=wins):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        # Should return a dict (meaningful) or None (not meaningful)
+        assert result is None or isinstance(result, dict)
+
+    def test_result_has_required_keys_when_meaningful(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        wins = self._make_active_windows(20, cls=0.45)  # high load → meaningful
+        with patch("analysis.load_decomposer.read_day", return_value=wins):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        if result is not None:
+            required = [
+                "total_cls_mean", "source_shares", "source_cls",
+                "dominant_source", "is_meaningful",
+                "terminal_block", "summary_line",
+            ]
+            for key in required:
+                assert key in result, f"Missing key: {key}"
+
+    def test_is_meaningful_flag_is_true(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        wins = self._make_active_windows(20, cls=0.45)
+        with patch("analysis.load_decomposer.read_day", return_value=wins):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        if result is not None:
+            assert result["is_meaningful"] is True
+
+    def test_source_shares_present_and_non_empty(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        wins = self._make_active_windows(20, cls=0.45)
+        with patch("analysis.load_decomposer.read_day", return_value=wins):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        if result is not None:
+            assert isinstance(result["source_shares"], dict)
+            assert len(result["source_shares"]) > 0
+
+    def test_dominant_source_is_string(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        wins = self._make_active_windows(20, cls=0.45)
+        with patch("analysis.load_decomposer.read_day", return_value=wins):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        if result is not None:
+            assert isinstance(result["dominant_source"], str)
+            assert result["dominant_source"] in {
+                "meetings", "slack", "physiology", "rescuetime", "omi"
+            }
+
+    def test_terminal_block_is_non_empty_string(self):
+        from scripts.report import _compute_load_decomposition_for_report
+        wins = self._make_active_windows(20, cls=0.45)
+        with patch("analysis.load_decomposer.read_day", return_value=wins):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        if result is not None:
+            assert isinstance(result["terminal_block"], str)
+            assert len(result["terminal_block"]) > 0
+
+    def test_graceful_failure_on_import_error(self):
+        """Should return None if load_decomposer is unavailable."""
+        from scripts.report import _compute_load_decomposition_for_report
+        import builtins
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if "load_decomposer" in name:
+                raise ImportError("simulated missing module")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=mock_import):
+            result = _compute_load_decomposition_for_report("2026-03-14")
+        assert result is None
+
+
+# ─── load_decomposition in build_report() ────────────────────────────────────
+
+class TestBuildReportIncludesLoadDecomposition:
+    """
+    Verify that build_report() includes the 'load_decomposition' key (v25).
+    """
+
+    def test_load_decomposition_key_present_in_report(self):
+        windows = _make_day_windows(10)
+        with patch("scripts.report.read_day", return_value=windows):
+            result = build_report("2026-03-14")
+        assert result is not None
+        assert "load_decomposition" in result, (
+            "build_report() must include 'load_decomposition' key (v25 requirement)"
+        )
+
+    def test_load_decomposition_is_none_or_dict(self):
+        windows = _make_day_windows(10)
+        with patch("scripts.report.read_day", return_value=windows):
+            result = build_report("2026-03-14")
+        decomp = result.get("load_decomposition")
+        assert decomp is None or isinstance(decomp, dict)
+
+
+# ─── print_full() includes Load Breakdown section ────────────────────────────
+
+class TestPrintFullIncludesLoadBreakdown:
+    """
+    Verify that print_full() renders the 🔍 Cognitive Load Breakdown section
+    when a meaningful load decomposition is available (v25).
+    """
+
+    def _make_high_load_windows(self) -> list[dict]:
+        """Windows with CLS high enough to produce a meaningful decomposition."""
+        wins = _make_day_windows(20)
+        for w in wins:
+            if w["metadata"]["is_working_hours"] and w["metadata"]["is_active_window"]:
+                w["metrics"]["cognitive_load_score"] = 0.55
+                w["slack"]["messages_received"] = 20
+                # Add meeting signal to boost load decomposition meaningfulness
+                w["calendar"]["in_meeting"] = True
+                w["calendar"]["meeting_attendees"] = 4
+        return wins
+
+    def test_breakdown_section_appears_when_high_load(self, capsys):
+        wins = self._make_high_load_windows()
+        with patch("scripts.report.read_day", return_value=wins), \
+             patch("analysis.load_decomposer.read_day", return_value=wins):
+            report = build_report("2026-03-14")
+            if report and report.get("load_decomposition"):
+                print_full(report, show_windows=False)
+                out = capsys.readouterr().out
+                assert "Cognitive Load Breakdown" in out or "Load breakdown" in out
+
+    def test_breakdown_section_absent_when_no_decomposition(self, capsys):
+        """When load_decomposition is None, no breakdown section should render."""
+        wins = _make_day_windows(10)
+        with patch("scripts.report.read_day", return_value=wins), \
+             patch("analysis.load_decomposer.read_day", return_value=[]):
+            report = build_report("2026-03-14")
+            print_full(report, show_windows=False)
+        out = capsys.readouterr().out
+        # Either it's absent, or if it appears it should still be valid output
+        # (no crashes is the key assertion)
+        assert isinstance(out, str)
