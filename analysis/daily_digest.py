@@ -166,6 +166,41 @@ v2.4 — Cognitive Load Decomposition in the nightly digest:
   - _compute_load_decomposition_for_digest(date_str) — exception-isolated helper
   - compute_digest() adds "load_decomposition" key to the return dict
   - format_digest_message() renders the decomposition section after the insight line
+
+v2.5 — Sleep Target Advisor:
+  The nightly digest now ends with a concrete sleep recommendation:
+  how many hours to sleep tonight and what time to be in bed.
+
+  Previously David could see tomorrow's predicted load and focus plan,
+  but not what to *do tonight* to prepare for it.  A "moderate day ahead"
+  is actionable only if you know: "aim for 7.5h sleep, in bed by 00:00."
+
+  The Sleep Target synthesises three signals:
+    1. Tomorrow's load label (from load_forecast) — heavier day = more sleep
+    2. Current CDI tier (cognitive debt) — debt accumulation = more sleep
+    3. Today's CLS — taxing days demand proportionally more recovery
+
+  Formula:
+    target_hours = base(load_label) + cdi_modifier + cls_modifier
+    bedtime      = 07:30 − target_hours
+
+  Urgency tiers:
+    ≥ 8.5h → 🚨 critical  (burnout-risk pattern)
+    ≥ 7.75h → 🌙 elevated  (elevated recovery need)
+    < 7.75h → 😴 normal
+
+  Example output at the bottom of the digest:
+    😴 *Sleep Target: 7.5h* (in bed by 00:00)
+    _Target 7.5h sleep (in bed by 00:00) — moderate day ahead._
+
+  Uses `analysis/sleep_target.py` for computation.
+
+  Implementation:
+  - _compute_sleep_target_for_digest(date_str, windows, ...) — exception-isolated
+  - tomorrow_load_forecast_data computed once and shared with sleep_target (no dup reads)
+  - compute_digest() adds "sleep_target" key to the return dict
+  - format_digest_message() renders it after the Tomorrow preview section
+  - 67 dedicated tests in tests/test_sleep_target.py
 """
 
 import json
@@ -869,6 +904,44 @@ def _compute_load_decomposition_for_digest(date_str: str) -> Optional[dict]:
         return None  # Never crash the digest over load decomposition
 
 
+def _compute_sleep_target_for_digest(
+    date_str: str,
+    windows: list[dict],
+    precomputed_tomorrow_load: Optional[dict],
+    precomputed_cdi: Optional[dict],
+) -> Optional[dict]:
+    """
+    Compute tonight's sleep target for the nightly digest (v2.5).
+
+    Synthesises tomorrow's predicted load, current CDI tier, and today's CLS
+    into a concrete sleep duration and bedtime recommendation.
+
+    Returns a compact dict:
+        {
+            "line":           str,   # one-liner, e.g. "😴 Tonight: 7.5h sleep (in bed by 23:00)"
+            "section":        str,   # two-line section with headline + narrative
+            "target_hours":   float,
+            "target_bedtime": str,
+            "urgency":        str,
+            "narrative":      str,
+            "is_meaningful":  bool,
+        }
+
+    Returns None on error or when is_meaningful=False (no load forecast data).
+    Fully exception-isolated — never crashes the digest.
+    """
+    try:
+        from analysis.sleep_target import compute_sleep_target_for_digest
+        return compute_sleep_target_for_digest(
+            today_date_str=date_str,
+            today_windows=windows,
+            precomputed_tomorrow_load=precomputed_tomorrow_load,
+            precomputed_cdi=precomputed_cdi,
+        )
+    except Exception:
+        return None  # Never crash the digest over sleep recommendation
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1126,6 +1199,11 @@ def compute_digest(windows: list[dict]) -> dict:
     except Exception:
         pass  # CDI is non-critical; never crash the digest
 
+    # ── Tomorrow's load forecast (v2.3 / v2.5) ────────────────────────────────
+    # Computed once and reused for both the "Tomorrow" section (v2.3) and the
+    # Sleep Target Advisor (v2.5) to avoid duplicate store reads.
+    tomorrow_load_forecast_data = _compute_load_forecast_for_digest(date_str)
+
     return {
         "date": date_str,
         "whoop": {
@@ -1184,12 +1262,22 @@ def compute_digest(windows: list[dict]) -> dict:
         # based on tomorrow's calendar and historical CLS patterns.
         # Shown alongside tomorrow's focus plan for a complete tomorrow preview.
         # (None when insufficient history or no calendar data)
-        "tomorrow_load_forecast": _compute_load_forecast_for_digest(date_str),
+        "tomorrow_load_forecast": tomorrow_load_forecast_data,
         # v2.4: Cognitive Load Decomposition — what drove today's CLS
         # Breaks load into source attributions: meetings, Slack, physiology,
         # RescueTime distraction, Omi conversations.  Only shown when avg CLS > 0.10.
         # (None when load is too low to decompose meaningfully)
         "load_decomposition": _compute_load_decomposition_for_digest(date_str),
+        # v2.5: Sleep Target Advisor — concrete sleep duration + bedtime for tonight
+        # Synthesises tomorrow's load, current CDI tier, and today's CLS into a
+        # single actionable recommendation: "Target 7.5h sleep (in bed by 23:00)".
+        # (None when tomorrow's load forecast is unavailable)
+        "sleep_target": _compute_sleep_target_for_digest(
+            date_str,
+            windows,
+            precomputed_tomorrow_load=tomorrow_load_forecast_data,
+            precomputed_cdi=cognitive_debt,
+        ),
     }
 
 
@@ -1386,6 +1474,7 @@ def format_digest_message(digest: dict) -> str:
     ml_insights = digest.get("ml_insights")           # v2.2: ML model insights or None
     tomorrow_load_forecast = digest.get("tomorrow_load_forecast")  # v2.3: tomorrow load forecast or None
     load_decomposition = digest.get("load_decomposition")          # v2.4: load source breakdown or None
+    sleep_target = digest.get("sleep_target")                      # v2.5: sleep target advisor or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1701,6 +1790,18 @@ def format_digest_message(digest: dict) -> str:
         # Legacy path: focus plan without load forecast
         lines.append("")
         lines.append(tomorrow_focus_plan["section"])
+
+    # ── Sleep Target Advisor (v2.5) ───────────────────────────────────────
+    # Concrete tonight's sleep recommendation: duration + bedtime.
+    # Placed last — it's the final action David should take after reading the digest.
+    # Synthesises tomorrow's load, CDI debt, and today's CLS into one sentence.
+    # Example: "😴 Tonight: 7.5h sleep (in bed by 23:00)"
+    #          "_Prioritise 7.5h sleep — demanding day ahead and your debt is building._"
+    if sleep_target and sleep_target.get("is_meaningful"):
+        sleep_section = sleep_target.get("section", "")
+        if sleep_section:
+            lines.append("")
+            lines.append(sleep_section)
 
     return "\n".join(lines)
 
