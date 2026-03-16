@@ -38,10 +38,31 @@ Output columns (CSV):
     rt_focus_min          RescueTime focused minutes (blank if not configured)
     rt_distraction_min    RescueTime distraction minutes (blank if not configured)
     rt_productive_pct     RescueTime % productive time (blank if not configured)
-    sources               Comma-separated list of data sources present
+    dps                   Daily Presence Score 0–100 (blank until enough history)
+    dps_tier              DPS tier: exceptional|strong|good|moderate|challenging|difficult
+    cdi_tier              Cognitive Debt Index tier: surplus|balanced|loading|fatigued|critical
+    omi_conversations     Omi: number of conversation sessions (blank if no Omi data)
+    omi_words             Omi: total words spoken (blank if no Omi data)
+    sources               Pipe-separated list of data sources present
 
 JSON format produces an array of objects with the same keys plus raw nested
-data (whoop, metrics_avg, focus_quality, calendar, rescuetime) as sub-dicts.
+data (whoop, metrics_avg, focus_quality, calendar, rescuetime, presence_score,
+omi) as sub-dicts.
+
+v2.0 additions (export):
+  - dps / dps_tier: Daily Presence Score — the single composite "how was your
+    cognitive day?" number (0–100).  Read from rolling.json when available;
+    computed live from JSONL windows as fallback.  Blank when insufficient data.
+
+  - cdi_tier: Cognitive Debt Index tier for the day — surplus | balanced |
+    loading | fatigued | critical.  Shows accumulated fatigue context.
+    Computed per-date from the rolling summary.
+
+  - omi_conversations / omi_words: Aggregated Omi transcript stats for the day.
+    Lets you correlate spoken conversation volume with cognitive load.
+    Blank on days with no Omi data.
+
+  - JSON _raw now includes presence_score and omi sub-dicts.
 
 Examples:
     # Weekly overview in terminal
@@ -71,7 +92,8 @@ from engine.store import list_available_dates, read_summary, read_day
 
 # ─── Column definitions ───────────────────────────────────────────────────────
 
-# Ordered list of (csv_column_name, description) for the header
+# Ordered list of CSV column names.
+# v2.0: added dps, dps_tier, cdi_tier, omi_conversations, omi_words
 CSV_COLUMNS = [
     "date",
     "recovery_score",
@@ -96,11 +118,18 @@ CSV_COLUMNS = [
     "rt_focus_min",
     "rt_distraction_min",
     "rt_productive_pct",
+    # v2.0: composite scores
+    "dps",
+    "dps_tier",
+    "cdi_tier",
+    # v2.0: Omi conversation stats
+    "omi_conversations",
+    "omi_words",
     "sources",
 ]
 
 
-# ─── Row extraction ────────────────────────────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _safe(value: Any, default: str = "") -> str:
     """Convert a value to CSV-safe string, using default for None."""
@@ -113,7 +142,7 @@ def _safe(value: Any, default: str = "") -> str:
 
 def _sources_for_date(date_str: str) -> str:
     """
-    Return comma-separated list of data sources present for a given date.
+    Return pipe-separated list of data sources present for a given date.
 
     Reads the first window's metadata.sources_available.  Falls back to
     inferring from the summary dict if windows are unavailable.
@@ -144,9 +173,87 @@ def _sources_for_date(date_str: str) -> str:
     return ""
 
 
+def _dps_for_date(date_str: str, day_data: dict) -> tuple[Optional[float], Optional[str]]:
+    """
+    Return (dps_score, dps_tier) for a date.
+
+    Priority:
+    1. Use presence_score cached in rolling.json (fast, no JSONL read).
+    2. Compute live from JSONL windows if not cached (fallback for old days).
+    3. Return (None, None) if insufficient data or computation fails.
+
+    Returns
+    -------
+    (dps: float | None, tier: str | None)
+    """
+    # 1. Fast path: use cached value from rolling.json
+    ps = day_data.get("presence_score")
+    if ps and ps.get("dps") is not None:
+        return ps["dps"], ps.get("tier")
+
+    # 2. Compute live from JSONL windows
+    try:
+        from analysis.presence_score import compute_presence_score
+        windows = read_day(date_str)
+        if not windows:
+            return None, None
+        score = compute_presence_score(windows)
+        if score.is_meaningful:
+            return score.dps, score.tier
+        return None, None
+    except Exception:
+        return None, None
+
+
+def _cdi_tier_for_date(date_str: str) -> Optional[str]:
+    """
+    Return the CDI tier string for a given date.
+
+    Uses the CDI module (reads from rolling.json — no JSONL access needed).
+    Returns None gracefully when insufficient history or on any error.
+    """
+    try:
+        from analysis.cognitive_debt import compute_cdi
+        debt = compute_cdi(date_str)
+        # Only return a meaningful tier; skip when CDI doesn't have enough history
+        if debt.is_meaningful:
+            return debt.tier
+        return None
+    except Exception:
+        return None
+
+
+def _omi_stats_for_date(date_str: str) -> tuple[Optional[int], Optional[int]]:
+    """
+    Return (total_conversation_sessions, total_words) from Omi data for a date.
+
+    Reads JSONL windows and aggregates all active Omi windows.
+    Returns (None, None) when no Omi data is present.
+    """
+    try:
+        windows = read_day(date_str)
+        if not windows:
+            return None, None
+        omi_windows = [
+            w for w in windows
+            if w.get("omi") and w["omi"].get("conversation_active")
+        ]
+        if not omi_windows:
+            return None, None
+        total_sessions = sum(w["omi"].get("sessions_count", 0) for w in omi_windows)
+        total_words = sum(w["omi"].get("word_count", 0) for w in omi_windows)
+        return total_sessions, total_words
+    except Exception:
+        return None, None
+
+
+# ─── Row builders ──────────────────────────────────────────────────────────────
+
 def build_row(date_str: str, day_data: dict) -> dict:
     """
     Build a flat dict from a day's rolling summary entry.
+
+    v2.0: includes dps, dps_tier, cdi_tier, omi_conversations, omi_words.
 
     Args:
         date_str: "YYYY-MM-DD"
@@ -161,6 +268,11 @@ def build_row(date_str: str, day_data: dict) -> dict:
     cal = day_data.get("calendar") or {}
     slack = day_data.get("slack") or {}
     rt = day_data.get("rescuetime") or {}
+
+    # v2.0: composite scores (computed lazily)
+    dps, dps_tier = _dps_for_date(date_str, day_data)
+    cdi_tier = _cdi_tier_for_date(date_str)
+    omi_sessions, omi_words = _omi_stats_for_date(date_str)
 
     return {
         "date": date_str,
@@ -192,6 +304,13 @@ def build_row(date_str: str, day_data: dict) -> dict:
         "rt_focus_min": _safe(rt.get("focus_minutes")),
         "rt_distraction_min": _safe(rt.get("distraction_minutes")),
         "rt_productive_pct": _safe(rt.get("productive_pct")),
+        # v2.0: composite scores
+        "dps": _safe(dps),
+        "dps_tier": _safe(dps_tier),
+        "cdi_tier": _safe(cdi_tier),
+        # v2.0: Omi conversation stats
+        "omi_conversations": _safe(omi_sessions),
+        "omi_words": _safe(omi_words),
         # Source coverage
         "sources": _sources_for_date(date_str),
     }
@@ -203,6 +322,8 @@ def build_json_row(date_str: str, day_data: dict) -> dict:
 
     The flat CSV row is merged with the raw sub-dicts from the summary
     so the JSON output is useful for programmatic analysis.
+
+    v2.0: _raw now includes presence_score and omi sub-dicts.
     """
     flat = build_row(date_str, day_data)
     # Re-attach original nested data for richer JSON
@@ -214,6 +335,8 @@ def build_json_row(date_str: str, day_data: dict) -> dict:
         "calendar": day_data.get("calendar"),
         "slack": day_data.get("slack"),
         "rescuetime": day_data.get("rescuetime"),
+        # v2.0: composite scores sub-dict
+        "presence_score": day_data.get("presence_score"),
     }
     return flat
 

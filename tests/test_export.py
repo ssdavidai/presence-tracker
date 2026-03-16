@@ -26,6 +26,9 @@ from scripts.export import (
     filter_dates,
     _safe,
     _sources_for_date,
+    _dps_for_date,
+    _cdi_tier_for_date,
+    _omi_stats_for_date,
 )
 
 
@@ -73,6 +76,16 @@ SAMPLE_DAY_WITH_RT = {
         "focus_minutes": 180.0,
         "distraction_minutes": 30.0,
         "productive_pct": 85.7,
+    },
+}
+
+# Day data that already has a cached DPS in the rolling summary
+SAMPLE_DAY_WITH_DPS = {
+    **SAMPLE_DAY_DATA,
+    "presence_score": {
+        "dps": 78.5,
+        "tier": "good",
+        "components": {"load_quality": 0.82, "focus": 0.75, "alignment": 0.90},
     },
 }
 
@@ -189,6 +202,185 @@ class TestBuildRow:
         # Should fall back to metrics_avg.focus_depth_index = 0.75
         assert row["avg_fdi"] == "0.7500"
 
+    def test_dps_from_cached_presence_score(self):
+        """When rolling.json has presence_score, dps column uses the cached value."""
+        with patch("scripts.export._sources_for_date", return_value=""):
+            row = build_row("2026-03-13", SAMPLE_DAY_WITH_DPS)
+        assert row["dps"] == "78.5000"
+        assert row["dps_tier"] == "good"
+
+    def test_dps_blank_when_not_cached_and_no_windows(self):
+        """When no cached DPS and JSONL has no data, dps columns are blank."""
+        with patch("scripts.export._sources_for_date", return_value=""), \
+             patch("scripts.export.read_day", return_value=[]):
+            row = build_row("2026-03-13", SAMPLE_DAY_DATA)
+        assert row["dps"] == ""
+        assert row["dps_tier"] == ""
+
+    def test_cdi_tier_blank_when_cdi_not_meaningful(self):
+        """When CDI has insufficient history, cdi_tier column is blank."""
+        mock_debt = MagicMock()
+        mock_debt.is_meaningful = False
+        with patch("scripts.export._sources_for_date", return_value=""), \
+             patch("scripts.export._cdi_tier_for_date", return_value=None):
+            row = build_row("2026-03-13", SAMPLE_DAY_DATA)
+        assert row["cdi_tier"] == ""
+
+    def test_cdi_tier_present_when_meaningful(self):
+        """When CDI is meaningful, cdi_tier column shows the tier string."""
+        with patch("scripts.export._sources_for_date", return_value=""), \
+             patch("scripts.export._cdi_tier_for_date", return_value="balanced"):
+            row = build_row("2026-03-13", SAMPLE_DAY_DATA)
+        assert row["cdi_tier"] == "balanced"
+
+    def test_omi_columns_blank_when_no_omi_data(self):
+        """When no Omi conversation windows exist, omi columns are blank."""
+        with patch("scripts.export._sources_for_date", return_value=""), \
+             patch("scripts.export._omi_stats_for_date", return_value=(None, None)):
+            row = build_row("2026-03-13", SAMPLE_DAY_DATA)
+        assert row["omi_conversations"] == ""
+        assert row["omi_words"] == ""
+
+    def test_omi_columns_populated_when_data_present(self):
+        """When Omi data exists, omi_conversations and omi_words are set."""
+        with patch("scripts.export._sources_for_date", return_value=""), \
+             patch("scripts.export._omi_stats_for_date", return_value=(3, 847)):
+            row = build_row("2026-03-13", SAMPLE_DAY_DATA)
+        assert row["omi_conversations"] == "3"
+        assert row["omi_words"] == "847"
+
+    def test_minimal_data_no_crash(self):
+        """Empty day_data must not raise — all fields should return empty strings."""
+        with patch("scripts.export._sources_for_date", return_value=""):
+            row = build_row("2026-03-13", MINIMAL_DAY_DATA)
+        assert set(row.keys()) == set(CSV_COLUMNS)
+        assert row["recovery_score"] == ""
+        assert row["avg_cls"] == ""
+
+
+# ─── Tests for _dps_for_date() ────────────────────────────────────────────────
+
+class TestDpsForDate:
+    def test_uses_cached_dps_from_rolling(self):
+        """When presence_score is in rolling.json, returns cached values."""
+        day_data = {
+            "presence_score": {"dps": 72.3, "tier": "good"},
+        }
+        dps, tier = _dps_for_date("2026-03-13", day_data)
+        assert dps == 72.3
+        assert tier == "good"
+
+    def test_none_when_empty_day_data_and_no_windows(self):
+        """When no cached DPS and no JSONL data, returns (None, None)."""
+        with patch("scripts.export.read_day", return_value=[]):
+            dps, tier = _dps_for_date("2026-03-13", {})
+        assert dps is None
+        assert tier is None
+
+    def test_graceful_on_compute_exception(self):
+        """Never raises — returns (None, None) if presence_score computation fails."""
+        with patch("scripts.export.read_day", side_effect=Exception("disk error")):
+            dps, tier = _dps_for_date("2026-03-13", {})
+        assert dps is None
+        assert tier is None
+
+    def test_presence_score_none_dps_falls_through(self):
+        """When presence_score key exists but dps is None, falls through to compute."""
+        day_data = {"presence_score": {"dps": None, "tier": None}}
+        with patch("scripts.export.read_day", return_value=[]):
+            dps, tier = _dps_for_date("2026-03-13", day_data)
+        assert dps is None
+
+
+# ─── Tests for _cdi_tier_for_date() ──────────────────────────────────────────
+
+class TestCdiTierForDate:
+    def test_returns_tier_when_meaningful(self):
+        """Returns the CDI tier string when CDI has sufficient history."""
+        mock_debt = MagicMock()
+        mock_debt.is_meaningful = True
+        mock_debt.tier = "loading"
+        with patch("analysis.cognitive_debt.compute_cdi", return_value=mock_debt):
+            result = _cdi_tier_for_date("2026-03-13")
+        assert result == "loading"
+
+    def test_returns_none_when_not_meaningful(self):
+        """Returns None when CDI module reports insufficient history."""
+        mock_debt = MagicMock()
+        mock_debt.is_meaningful = False
+        with patch("analysis.cognitive_debt.compute_cdi", return_value=mock_debt):
+            result = _cdi_tier_for_date("2026-03-13")
+        assert result is None
+
+    def test_graceful_on_exception(self):
+        """Never raises — returns None if CDI computation throws."""
+        with patch("analysis.cognitive_debt.compute_cdi", side_effect=Exception("fail")):
+            result = _cdi_tier_for_date("2026-03-13")
+        assert result is None
+
+
+# ─── Tests for _omi_stats_for_date() ─────────────────────────────────────────
+
+class TestOmiStatsForDate:
+    def _make_omi_window(self, sessions=1, words=200, active=True):
+        return {
+            "omi": {
+                "conversation_active": active,
+                "sessions_count": sessions,
+                "word_count": words,
+                "speech_seconds": 60.0,
+            }
+        }
+
+    def test_returns_none_none_when_no_windows(self):
+        with patch("scripts.export.read_day", return_value=[]):
+            sessions, words = _omi_stats_for_date("2026-03-13")
+        assert sessions is None
+        assert words is None
+
+    def test_returns_none_none_when_no_omi_key(self):
+        windows = [{"calendar": {}, "slack": {}, "metrics": {}}]
+        with patch("scripts.export.read_day", return_value=windows):
+            sessions, words = _omi_stats_for_date("2026-03-13")
+        assert sessions is None
+        assert words is None
+
+    def test_returns_none_none_when_no_active_conversations(self):
+        windows = [self._make_omi_window(active=False)]
+        with patch("scripts.export.read_day", return_value=windows):
+            sessions, words = _omi_stats_for_date("2026-03-13")
+        assert sessions is None
+        assert words is None
+
+    def test_aggregates_sessions_and_words(self):
+        """Multiple active Omi windows should be summed."""
+        windows = [
+            self._make_omi_window(sessions=1, words=300),
+            self._make_omi_window(sessions=2, words=547),
+        ]
+        with patch("scripts.export.read_day", return_value=windows):
+            sessions, words = _omi_stats_for_date("2026-03-13")
+        assert sessions == 3   # 1 + 2
+        assert words == 847    # 300 + 547
+
+    def test_skips_inactive_windows_in_aggregation(self):
+        """Inactive Omi windows (conversation_active=False) are excluded."""
+        windows = [
+            self._make_omi_window(sessions=2, words=400, active=True),
+            self._make_omi_window(sessions=1, words=200, active=False),  # excluded
+        ]
+        with patch("scripts.export.read_day", return_value=windows):
+            sessions, words = _omi_stats_for_date("2026-03-13")
+        assert sessions == 2
+        assert words == 400
+
+    def test_graceful_on_exception(self):
+        """Never raises — returns (None, None) on any error."""
+        with patch("scripts.export.read_day", side_effect=Exception("disk error")):
+            sessions, words = _omi_stats_for_date("2026-03-13")
+        assert sessions is None
+        assert words is None
+
 
 # ─── Tests for build_json_row() ───────────────────────────────────────────────
 
@@ -208,6 +400,20 @@ class TestBuildJsonRow:
         assert "metrics_avg" in raw
         assert "focus_quality" in raw
         assert "calendar" in raw
+
+    def test_raw_includes_presence_score(self):
+        """v2.0: _raw should include presence_score sub-dict."""
+        with patch("scripts.export._sources_for_date", return_value=""):
+            row = build_json_row("2026-03-13", SAMPLE_DAY_WITH_DPS)
+        assert "_raw" in row
+        assert "presence_score" in row["_raw"]
+        assert row["_raw"]["presence_score"]["dps"] == 78.5
+
+    def test_raw_presence_score_none_when_absent(self):
+        """When presence_score not in day_data, _raw.presence_score is None."""
+        with patch("scripts.export._sources_for_date", return_value=""):
+            row = build_json_row("2026-03-13", SAMPLE_DAY_DATA)
+        assert row["_raw"]["presence_score"] is None
 
     def test_raw_whoop_matches_input(self):
         with patch("scripts.export._sources_for_date", return_value=""):
@@ -549,6 +755,17 @@ class TestCsvColumns:
         assert "active_windows" in CSV_COLUMNS
         assert "peak_focus_hour" in CSV_COLUMNS
         assert "peak_focus_fdi" in CSV_COLUMNS
+
+    def test_v2_composite_score_columns_present(self):
+        """v2.0: DPS, CDI tier, and Omi columns must be in the schema."""
+        assert "dps" in CSV_COLUMNS, "dps column missing (v2.0)"
+        assert "dps_tier" in CSV_COLUMNS, "dps_tier column missing (v2.0)"
+        assert "cdi_tier" in CSV_COLUMNS, "cdi_tier column missing (v2.0)"
+
+    def test_v2_omi_columns_present(self):
+        """v2.0: Omi conversation stats must be in the schema."""
+        assert "omi_conversations" in CSV_COLUMNS, "omi_conversations column missing (v2.0)"
+        assert "omi_words" in CSV_COLUMNS, "omi_words column missing (v2.0)"
 
     def test_no_duplicate_columns(self):
         assert len(CSV_COLUMNS) == len(set(CSV_COLUMNS))
