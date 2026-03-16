@@ -668,6 +668,15 @@ def compute_morning_brief(
         # Personalises the recovery context with David's own statistical patterns.
         # Returns None when insufficient data or on any error (graceful degradation).
         "sleep_focus": _compute_sleep_focus_for_brief(today_date),
+        # v22.0: Weekly Cognitive Pacing — forward-looking week strategy.
+        # Shown on Monday mornings (and optionally on any day).
+        # Classifies each workday as PUSH / STEADY / PROTECT based on calendar
+        # meeting load + current CDI tier.  Answers: "How should I pace myself
+        # across the week to maximise output without accumulating cognitive debt?"
+        # Complements the daily FocusPlanner (1-day) with a 5-day horizon.
+        # Only fetches full section on Mondays to avoid excessive API calls.
+        # Returns None on error (graceful degradation).
+        "weekly_pacing": _compute_weekly_pacing_for_brief(today_date, today_calendar),
     }
 
 
@@ -995,6 +1004,50 @@ def _compute_sleep_focus_for_brief(date_str: str) -> Optional[dict]:
             "pairs_used": corr.pairs_used,
             "sleep_hours_slope": corr.sleep_hours_slope,
             "r_sleep_fdi": corr.correlations.get("sleep_hours__next_day_fdi"),
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_weekly_pacing_for_brief(
+    date_str: str,
+    today_calendar: Optional[dict] = None,
+) -> Optional[dict]:
+    """
+    Compute the weekly cognitive pacing plan for the morning brief.
+
+    Runs on every morning but only fetches the full calendar-based plan on
+    Mondays (to avoid 5 sequential API calls on every morning run).  On other
+    days, returns the compact one-liner only (using no-calendar mode).
+
+    Returns a dict with 'line', 'section', 'strategy', or None on error.
+    """
+    try:
+        from analysis.weekly_pacing import (
+            compute_weekly_pacing,
+            format_weekly_pacing_line,
+            format_weekly_pacing_section,
+        )
+
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        is_monday = dt.weekday() == 0  # 0 = Monday
+
+        # On Mondays: fetch full calendar-based plan (authoritative weekly view)
+        # On other days: use no-calendar mode (compact line only)
+        plan = compute_weekly_pacing(date_str, fetch_calendar=is_monday)
+
+        if not plan.is_meaningful:
+            return None
+
+        line = format_weekly_pacing_line(plan)
+        section = format_weekly_pacing_section(plan) if is_monday else ""
+
+        return {
+            "line": line,
+            "section": section,
+            "strategy": plan.strategy,
+            "is_monday": is_monday,
             "is_meaningful": True,
         }
     except Exception:
@@ -1340,6 +1393,23 @@ def format_morning_brief_message(brief: dict) -> str:
         if sf_line:
             lines.append("")
             lines.append(f"_{sf_line}_")
+
+    # ── Weekly Pacing (v22.0) ─────────────────────────────────────────────
+    # On Mondays: show the full 5-day pacing section (calendar-aware).
+    # On other days: show just the compact one-liner (no calendar calls).
+    weekly_pacing = brief.get("weekly_pacing")
+    if weekly_pacing and weekly_pacing.get("is_meaningful"):
+        is_monday = weekly_pacing.get("is_monday", False)
+        if is_monday:
+            section = weekly_pacing.get("section", "")
+            if section:
+                lines.append("")
+                lines.append(section)
+        else:
+            line = weekly_pacing.get("line", "")
+            if line:
+                lines.append("")
+                lines.append(f"_{line}_")
 
     return "\n".join(lines)
 
