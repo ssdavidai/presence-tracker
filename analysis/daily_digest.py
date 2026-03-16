@@ -201,6 +201,44 @@ v2.5 — Sleep Target Advisor:
   - compute_digest() adds "sleep_target" key to the return dict
   - format_digest_message() renders it after the Tomorrow preview section
   - 67 dedicated tests in tests/test_sleep_target.py
+
+v2.6 — Tomorrow's Cognitive Budget in Nightly Digest:
+  The nightly digest's "Tomorrow" section now includes a cognitive budget
+  estimate for tomorrow — completing the forward-looking preview that already
+  includes load forecast, focus plan, and sleep target.
+
+  Previously David saw:
+    📊 Tomorrow: Moderate day (CLS ~0.45, 2h meetings)
+    [Focus blocks: 09:00–10:30, 14:00–15:30]
+    😴 Tonight: 7.5h sleep (in bed by 23:00)
+
+  Now he also sees:
+    🧠 *Tomorrow's budget:* ~5.5h — Strong day  _(86% recovery · balanced CDI)_
+
+  This answers the question: "Even if tomorrow looks moderate on paper,
+  how much cognitive capacity will I actually have to do deep work?"
+
+  The budget is computed from today's WHOOP recovery data (which carries
+  forward to tomorrow) and the current CDI tier (accumulated debt).
+  It uses the same formula as the morning brief's cognitive budget, but
+  framed as a forecast for the next day rather than the current day.
+
+  Why this belongs in the nightly digest and not just the morning brief:
+  - At night, David is planning tomorrow: which calendar blocks to protect,
+    which hard problems to tackle, which tasks to defer.
+  - The budget number gives that planning a concrete constraint: "I have
+    ~5.5h of quality work tomorrow, not an unlimited day."
+  - It pairs naturally with the load forecast (what will drain me) and
+    the focus plan (when to schedule deep work).
+
+  Implementation:
+  - _compute_tomorrow_cognitive_budget_for_digest(date_str, windows) — isolated helper
+  - Uses today's WHOOP data (already in windows) + current CDI (already computed)
+  - compute_digest() passes precomputed CDI to avoid duplicate store reads
+  - compute_digest() adds "tomorrow_cognitive_budget" key to return dict
+  - format_digest_message() renders it as a single line in the Tomorrow section,
+    between load forecast and focus plan
+  - Tests: tests/test_tomorrow_cognitive_budget_digest.py
 """
 
 import json
@@ -942,6 +980,112 @@ def _compute_sleep_target_for_digest(
         return None  # Never crash the digest over sleep recommendation
 
 
+def _compute_tomorrow_cognitive_budget_for_digest(
+    windows: list[dict],
+    precomputed_cdi: Optional[dict],
+) -> Optional[dict]:
+    """
+    Compute tomorrow's cognitive budget for the nightly digest (v2.6).
+
+    Uses today's WHOOP data (which carries forward to tomorrow) and the
+    current CDI tier (accumulated debt) to estimate how many quality
+    cognitive hours David will have tomorrow.
+
+    This completes the nightly "Tomorrow" preview:
+      📊 Load forecast — what will demand my energy
+      🧠 Cognitive budget — how much capacity I'll actually have
+      📅 Focus plan — when to schedule deep work
+      😴 Sleep target — what to do tonight to prepare
+
+    Returns a dict:
+        {
+            "line":       str,    # Slack-ready line e.g. "🧠 *Tomorrow's budget:* ~5.5h — Strong day"
+            "dcb_hours":  float,  # Point estimate
+            "dcb_low":    float,  # Conservative bound
+            "dcb_high":   float,  # Optimistic bound
+            "tier":       str,    # peak | good | moderate | low | recovery
+            "label":      str,    # "Peak day" | "Strong day" | "Steady" | "Conserve" | "Protect"
+            "is_meaningful": bool,
+        }
+
+    Returns None on error or when WHOOP data is unavailable (is_meaningful=False).
+    Fully exception-isolated — never crashes the digest.
+    """
+    try:
+        if not windows:
+            return None
+
+        # Extract today's WHOOP data from the first window (same for all windows)
+        whoop_data = windows[0].get("whoop")
+        if not whoop_data or whoop_data.get("recovery_score") is None:
+            return None
+
+        # Extract CDI tier from precomputed digest data (avoids duplicate reads)
+        cdi_tier: Optional[str] = None
+        if precomputed_cdi and precomputed_cdi.get("tier"):
+            cdi_tier = precomputed_cdi["tier"]
+
+        # Load personal baseline for HRV modifier
+        hrv_baseline: Optional[float] = None
+        try:
+            from analysis.personal_baseline import get_personal_baseline
+            baseline = get_personal_baseline()
+            hrv_baseline = baseline.hrv_mean
+        except Exception:
+            pass  # HRV modifier is optional — degrade gracefully
+
+        from analysis.cognitive_budget import compute_cognitive_budget, format_budget_line
+
+        budget = compute_cognitive_budget(
+            date_str=windows[0].get("date", ""),
+            whoop_data=whoop_data,
+            cdi_tier=cdi_tier,
+            hrv_baseline=hrv_baseline,
+        )
+
+        if not budget.is_meaningful:
+            return None
+
+        # Reformat the budget line to say "Tomorrow's budget" instead of "Cognitive budget"
+        # so it's clear in the Tomorrow section that this is a forward-looking estimate.
+        modifiers = []
+        if budget.recovery_score is not None:
+            modifiers.append(f"{budget.recovery_score:.0f}% recovery")
+        if budget.cdi_tier:
+            cdi_short = {
+                "surplus":  "surplus CDI",
+                "balanced": "balanced CDI",
+                "loading":  "loading CDI",
+                "fatigued": "fatigued CDI",
+                "critical": "critical CDI",
+            }.get(budget.cdi_tier, f"{budget.cdi_tier} CDI")
+            modifiers.append(cdi_short)
+
+        mod_str = " · ".join(modifiers)
+        range_str = (
+            f" ({budget.dcb_low:.1f}–{budget.dcb_high:.1f}h)"
+            if budget.dcb_low != budget.dcb_high
+            else ""
+        )
+        suffix = f"  _({mod_str})_" if mod_str else ""
+        line = (
+            f"🧠 *Tomorrow's budget:* ~{budget.dcb_hours:.1f}h{range_str} — {budget.label}"
+            + suffix
+        )
+
+        return {
+            "line": line,
+            "dcb_hours": budget.dcb_hours,
+            "dcb_low": budget.dcb_low,
+            "dcb_high": budget.dcb_high,
+            "tier": budget.tier,
+            "label": budget.label,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None  # Never crash the digest over cognitive budget
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1278,6 +1422,14 @@ def compute_digest(windows: list[dict]) -> dict:
             precomputed_tomorrow_load=tomorrow_load_forecast_data,
             precomputed_cdi=cognitive_debt,
         ),
+        # v2.6: Tomorrow's Cognitive Budget — quality hours available tomorrow
+        # Uses today's WHOOP data + CDI tier to estimate next-day cognitive capacity.
+        # Completes the Tomorrow preview: load (what drains) + budget (what's available).
+        # (None when WHOOP data unavailable or cognitive_budget computation fails)
+        "tomorrow_cognitive_budget": _compute_tomorrow_cognitive_budget_for_digest(
+            windows,
+            precomputed_cdi=cognitive_debt,
+        ),
     }
 
 
@@ -1472,9 +1624,10 @@ def format_digest_message(digest: dict) -> str:
     presence_score = digest.get("presence_score")     # v1.8: DPS dict or None
     meeting_intel = digest.get("meeting_intel")       # v2.0: Meeting Intel dict or None
     ml_insights = digest.get("ml_insights")           # v2.2: ML model insights or None
-    tomorrow_load_forecast = digest.get("tomorrow_load_forecast")  # v2.3: tomorrow load forecast or None
-    load_decomposition = digest.get("load_decomposition")          # v2.4: load source breakdown or None
-    sleep_target = digest.get("sleep_target")                      # v2.5: sleep target advisor or None
+    tomorrow_load_forecast = digest.get("tomorrow_load_forecast")       # v2.3: tomorrow load forecast or None
+    load_decomposition = digest.get("load_decomposition")              # v2.4: load source breakdown or None
+    sleep_target = digest.get("sleep_target")                          # v2.5: sleep target advisor or None
+    tomorrow_cognitive_budget = digest.get("tomorrow_cognitive_budget") # v2.6: tomorrow's quality hours or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1757,19 +1910,22 @@ def format_digest_message(digest: dict) -> str:
         lines.append("")
         lines.append(load_decomposition["section"])
 
-    # ── Tomorrow Preview (v2.3) ───────────────────────────────────────────
-    # Combine load forecast + focus plan into a unified tomorrow preview section.
-    # Placed at the bottom of the digest so David ends with forward-looking info.
+    # ── Tomorrow Preview (v2.3 / v2.6) ──────────────────────────────────────
+    # Combine load forecast + cognitive budget + focus plan into a unified
+    # tomorrow preview section.  Placed at the bottom of the digest so David
+    # ends with forward-looking information to plan with.
     #
-    # Load forecast (new in v2.3): "Tomorrow looks like a Moderate day (CLS ~0.45)"
-    # Focus plan (v1.9): specific deep-work blocks for tomorrow
+    # v2.3: Load forecast  — "Tomorrow looks like a Moderate day (CLS ~0.45)"
+    # v2.6: Cognitive budget — "Tomorrow's budget: ~5.5h — Strong day"
+    # v1.9: Focus plan     — specific deep-work blocks for tomorrow
     #
-    # Both are individually optional — shown only when meaningful data exists.
+    # All three are individually optional — shown only when meaningful data exists.
     tomorrow_focus_plan = digest.get("tomorrow_focus_plan")
     has_tomorrow_load = tomorrow_load_forecast and tomorrow_load_forecast.get("is_meaningful")
+    has_tomorrow_budget = tomorrow_cognitive_budget and tomorrow_cognitive_budget.get("is_meaningful")
     has_tomorrow_plan = tomorrow_focus_plan and tomorrow_focus_plan.get("is_meaningful") and tomorrow_focus_plan.get("section")
 
-    if has_tomorrow_load or has_tomorrow_plan:
+    if has_tomorrow_load or has_tomorrow_budget or has_tomorrow_plan:
         lines.append("")
         lines.append("*Tomorrow*")
 
@@ -1782,12 +1938,20 @@ def format_digest_message(digest: dict) -> str:
             if narrative:
                 lines.append(f"_{narrative}_")
 
+        # v2.6: Cognitive budget — how much quality capacity tomorrow holds
+        # Shows right after the load forecast so David immediately sees the pair:
+        # "tomorrow demands X" + "you'll have Y quality hours to meet it"
+        if has_tomorrow_budget:
+            budget_line = tomorrow_cognitive_budget.get("line", "")
+            if budget_line:
+                lines.append(budget_line)
+
         if has_tomorrow_plan:
-            if has_tomorrow_load:
+            if has_tomorrow_load or has_tomorrow_budget:
                 lines.append("")
             lines.append(tomorrow_focus_plan["section"])
     elif tomorrow_focus_plan and tomorrow_focus_plan.get("is_meaningful") and tomorrow_focus_plan.get("section"):
-        # Legacy path: focus plan without load forecast
+        # Legacy path: focus plan without load forecast or budget
         lines.append("")
         lines.append(tomorrow_focus_plan["section"])
 
