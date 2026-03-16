@@ -141,6 +141,31 @@ v2.3 — Tomorrow's load forecast in the nightly digest:
     and returns a serialised dict
   - compute_digest() adds "tomorrow_load_forecast" key to the return dict
   - format_digest_message() renders both in a combined "Tomorrow" section
+
+v2.4 — Cognitive Load Decomposition in the nightly digest:
+  The digest tells David *how much* cognitive load he had (CLS = 0.72) but not
+  *what drove it*.  Was it meetings? Slack? Low recovery?  The Decomposer closes
+  this gap by attributing today's CLS to its five source components.
+
+  Added as a new section after the insight line:
+
+    🔍 *What drove today's load*
+
+    📅 `Meetings           ` ████████░░  42%
+    💬 `Slack              ` ██████░░░░  28%
+    💤 `Recovery deficit   ` ████░░░░░░  18%
+    💻 `Screen distraction ` ██░░░░░░░░  10%
+    🎙 `Conversations      ` ░░░░░░░░░░   2%
+
+    _Meetings drove 42% of today's cognitive load — consider batching them._
+
+  Only shown when avg CLS > 10% (no point decomposing a near-zero load day).
+  Uses `analysis/load_decomposer.py` for computation.
+
+  Implementation:
+  - _compute_load_decomposition_for_digest(date_str) — exception-isolated helper
+  - compute_digest() adds "load_decomposition" key to the return dict
+  - format_digest_message() renders the decomposition section after the insight line
 """
 
 import json
@@ -793,6 +818,57 @@ def _compute_load_forecast_for_digest(today_date_str: str) -> Optional[dict]:
         return None  # Never crash the digest over load forecast
 
 
+def _compute_load_decomposition_for_digest(date_str: str) -> Optional[dict]:
+    """
+    Compute cognitive load source decomposition for the nightly digest (v2.4).
+
+    Breaks today's CLS into constituent source attributions:
+      meetings, slack, physiology, rescuetime, omi
+
+    So David can see not just *how much* load he had, but *what drove it*.
+
+    Returns a dict:
+        {
+            "section":        str,                 # Slack-ready bar-chart section
+            "line":           str,                 # compact one-liner
+            "dominant":       str,                 # dominant source name
+            "shares":         dict[str, float],    # fraction per source
+            "total_cls_mean": float,
+            "is_meaningful":  bool,
+        }
+
+    Returns None on error or when is_meaningful=False.
+    Fully exception-isolated — never crashes the digest.
+    """
+    try:
+        from analysis.load_decomposer import (
+            compute_load_decomposition,
+            format_decomposition_section,
+            format_decomposition_line,
+        )
+
+        decomp = compute_load_decomposition(date_str)
+
+        if not decomp.is_meaningful:
+            return None
+
+        # Only surface when there's meaningful load to explain (>10% avg CLS)
+        if decomp.total_cls_mean < 0.10:
+            return None
+
+        return {
+            "section": format_decomposition_section(decomp),
+            "line": format_decomposition_line(decomp),
+            "dominant": decomp.dominant_source,
+            "shares": decomp.source_shares,
+            "total_cls_mean": decomp.total_cls_mean,
+            "insight_lines": decomp.insight_lines,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None  # Never crash the digest over load decomposition
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1109,6 +1185,11 @@ def compute_digest(windows: list[dict]) -> dict:
         # Shown alongside tomorrow's focus plan for a complete tomorrow preview.
         # (None when insufficient history or no calendar data)
         "tomorrow_load_forecast": _compute_load_forecast_for_digest(date_str),
+        # v2.4: Cognitive Load Decomposition — what drove today's CLS
+        # Breaks load into source attributions: meetings, Slack, physiology,
+        # RescueTime distraction, Omi conversations.  Only shown when avg CLS > 0.10.
+        # (None when load is too low to decompose meaningfully)
+        "load_decomposition": _compute_load_decomposition_for_digest(date_str),
     }
 
 
@@ -1304,6 +1385,7 @@ def format_digest_message(digest: dict) -> str:
     meeting_intel = digest.get("meeting_intel")       # v2.0: Meeting Intel dict or None
     ml_insights = digest.get("ml_insights")           # v2.2: ML model insights or None
     tomorrow_load_forecast = digest.get("tomorrow_load_forecast")  # v2.3: tomorrow load forecast or None
+    load_decomposition = digest.get("load_decomposition")          # v2.4: load source breakdown or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1578,6 +1660,13 @@ def format_digest_message(digest: dict) -> str:
     if insight:
         lines.append("")
         lines.append(f"💡 {insight}")
+
+    # ── Cognitive Load Decomposition (v2.4) ───────────────────────────────
+    # What drove today's CLS: meetings, Slack, recovery deficit, distraction,
+    # or spoken conversations?  Only shown when avg CLS > 10% (meaningful load).
+    if load_decomposition and load_decomposition.get("section"):
+        lines.append("")
+        lines.append(load_decomposition["section"])
 
     # ── Tomorrow Preview (v2.3) ───────────────────────────────────────────
     # Combine load forecast + focus plan into a unified tomorrow preview section.

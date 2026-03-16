@@ -289,7 +289,9 @@ presence-tracker/
 ├── analysis/
 │   ├── __init__.py
 │   ├── intuition.py           # LLM-powered pattern analysis
-│   └── ml_model.py            # scikit-learn model training/inference
+│   ├── ml_model.py            # scikit-learn model training/inference
+│   ├── load_decomposer.py     # CLS source attribution (meetings/Slack/physiology/RT/Omi)
+│   └── ...                    # (many more: anomaly_alerts, daily_digest, morning_brief, ...)
 ├── temporal/
 │   ├── __init__.py
 │   ├── worker.py              # Temporal worker
