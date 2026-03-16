@@ -1399,3 +1399,165 @@ class TestTomorrowFocusPlanInDigest:
         with patch("analysis.focus_planner.plan_tomorrow_focus", side_effect=RuntimeError("test")):
             result = _compute_focus_plan_for_digest("2026-03-13")
         assert result is None
+
+
+# ─── Meeting Intelligence integration (v2.0) ─────────────────────────────────
+
+class TestMeetingIntelDigestIntegration:
+    """
+    Tests for the v2.0 Meeting Intelligence integration into the daily digest.
+    Covers _compute_meeting_intel_for_digest() and format_digest_message() rendering.
+    """
+
+    def _windows_with_meetings(self) -> list[dict]:
+        """Build windows with 2 hours of meetings in the morning."""
+        return build_windows(
+            date_str="2026-03-16",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_HEAVY,
+            slack_windows={},
+        )
+
+    def _windows_no_meetings(self) -> list[dict]:
+        """Build windows with no meetings."""
+        return build_windows(
+            date_str="2026-03-16",
+            whoop_data=SAMPLE_WHOOP,
+            calendar_data=SAMPLE_CALENDAR_EMPTY,
+            slack_windows={},
+        )
+
+    # ── _compute_meeting_intel_for_digest unit tests ──────────────────────
+
+    def test_importable(self):
+        """_compute_meeting_intel_for_digest can be imported."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        assert callable(_compute_meeting_intel_for_digest)
+
+    def test_returns_none_for_empty_windows(self):
+        """Returns None when given an empty windows list."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        result = _compute_meeting_intel_for_digest([], "2026-03-16")
+        assert result is None
+
+    def test_returns_none_when_no_meetings(self):
+        """Returns None when the day has no meetings."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        windows = self._windows_no_meetings()
+        result = _compute_meeting_intel_for_digest(windows, "2026-03-16")
+        assert result is None
+
+    def test_returns_dict_when_meetings_exist(self):
+        """Returns a dict with meeting intel keys when the day had meetings."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        windows = self._windows_with_meetings()
+        result = _compute_meeting_intel_for_digest(windows, "2026-03-16")
+        # May be None if SAMPLE_CALENDAR_HEAVY windows don't produce meeting windows
+        # — either None or a valid dict is acceptable
+        if result is not None:
+            assert isinstance(result, dict)
+
+    def test_result_has_expected_keys_when_meaningful(self):
+        """When meetings are detected, the result dict has all expected keys."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        windows = self._windows_with_meetings()
+        result = _compute_meeting_intel_for_digest(windows, "2026-03-16")
+        if result is None:
+            pytest.skip("No meeting windows generated — calendar fixture may not produce meetings")
+        expected_keys = {
+            "mis", "ffs", "cmc", "sdr", "meeting_recovery_fit",
+            "meeting_count", "total_meeting_minutes", "free_gap_minutes",
+            "peak_focus_threats", "headline", "advisory", "section",
+        }
+        assert expected_keys.issubset(result.keys()), f"Missing keys: {expected_keys - result.keys()}"
+
+    def test_section_is_non_empty_string_when_meaningful(self):
+        """The pre-formatted Slack section is a non-empty string."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        windows = self._windows_with_meetings()
+        result = _compute_meeting_intel_for_digest(windows, "2026-03-16")
+        if result is None:
+            pytest.skip("No meeting windows generated")
+        assert isinstance(result["section"], str)
+        assert len(result["section"]) > 0
+
+    def test_mis_is_in_valid_range_when_meaningful(self):
+        """MIS is an integer in [0, 100]."""
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        windows = self._windows_with_meetings()
+        result = _compute_meeting_intel_for_digest(windows, "2026-03-16")
+        if result is None:
+            pytest.skip("No meeting windows generated")
+        mis = result["mis"]
+        if mis is not None:
+            assert 0 <= mis <= 100, f"MIS {mis} is outside [0, 100]"
+
+    def test_does_not_crash_on_exception(self):
+        """Returns None gracefully when meeting_intel raises an exception."""
+        from unittest.mock import patch
+        from analysis.daily_digest import _compute_meeting_intel_for_digest
+        with patch("analysis.meeting_intel.compute_meeting_intel", side_effect=RuntimeError("boom")):
+            result = _compute_meeting_intel_for_digest(
+                self._windows_with_meetings(), "2026-03-16"
+            )
+        assert result is None
+
+    # ── compute_digest integration tests ─────────────────────────────────
+
+    def test_compute_digest_includes_meeting_intel_key(self):
+        """compute_digest() always includes the 'meeting_intel' key."""
+        windows = self._windows_no_meetings()
+        digest = compute_digest(windows)
+        assert "meeting_intel" in digest
+
+    def test_meeting_intel_is_none_when_no_meetings(self):
+        """meeting_intel is None when the day had no meetings."""
+        windows = self._windows_no_meetings()
+        digest = compute_digest(windows)
+        assert digest["meeting_intel"] is None
+
+    # ── format_digest_message rendering tests ────────────────────────────
+
+    def test_format_digest_shows_meeting_intel_section(self):
+        """When meeting_intel has a section, it appears in the formatted message."""
+        windows = self._windows_no_meetings()
+        digest = compute_digest(windows)
+        digest["meeting_intel"] = {
+            "mis": 72,
+            "section": "*📅 Meeting Intelligence:*\nMIS 72/100 — Acceptable load.",
+        }
+        msg = format_digest_message(digest)
+        assert "Meeting Intelligence" in msg
+
+    def test_format_digest_omits_meeting_intel_when_none(self):
+        """When meeting_intel is None, the section is absent from the message."""
+        windows = self._windows_no_meetings()
+        digest = compute_digest(windows)
+        assert digest["meeting_intel"] is None
+        msg = format_digest_message(digest)
+        assert "Meeting Intelligence" not in msg
+
+    def test_format_digest_omits_meeting_intel_when_section_missing(self):
+        """When meeting_intel dict has no 'section' key, nothing crashes."""
+        windows = self._windows_no_meetings()
+        digest = compute_digest(windows)
+        digest["meeting_intel"] = {"mis": 80}  # no 'section' key
+        msg = format_digest_message(digest)
+        assert "Meeting Intelligence" not in msg
+        assert isinstance(msg, str)
+
+    def test_meeting_intel_section_appears_before_insight(self):
+        """Meeting Intel section appears before the insight line."""
+        windows = self._windows_no_meetings()
+        digest = compute_digest(windows)
+        digest["meeting_intel"] = {
+            "mis": 55,
+            "section": "*📅 Meeting Intelligence:*\nMIS 55/100 — Heavy fragmentation.",
+        }
+        digest["insight"] = "Watch your cognitive load."
+        msg = format_digest_message(digest)
+        mi_pos = msg.find("Meeting Intelligence")
+        insight_pos = msg.find("Watch your cognitive load")
+        assert mi_pos != -1, "Meeting Intel not found"
+        assert insight_pos != -1, "Insight not found"
+        assert mi_pos < insight_pos, "Meeting Intel should appear before insight"

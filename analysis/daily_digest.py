@@ -512,6 +512,49 @@ def _compute_focus_plan_for_digest(today_date_str: str) -> Optional[dict]:
         return None
 
 
+def _compute_meeting_intel_for_digest(windows: list[dict], date_str: str) -> Optional[dict]:
+    """
+    Compute Meeting Intelligence for the digest.
+
+    Returns a dict with MIS, FFS, CMC, SDR, meeting_recovery_fit, headline,
+    advisory, and a pre-formatted Slack section — or None when no meetings
+    or the meeting_intel module fails.
+    """
+    try:
+        from analysis.meeting_intel import compute_meeting_intel, format_meeting_intel_section
+
+        # Extract WHOOP data (same across all windows — take first hit)
+        whoop_data: dict = {}
+        for w in windows:
+            wd = w.get("whoop") or {}
+            if wd.get("recovery_score") is not None:
+                whoop_data = wd
+                break
+
+        intel = compute_meeting_intel(windows, whoop_data, date_str)
+        if not intel.is_meaningful:
+            return None
+
+        return {
+            "mis": intel.meeting_intelligence_score,
+            "ffs": intel.focus_fragmentation_score,
+            "cmc": intel.cognitive_meeting_cost,
+            "sdr": intel.social_drain_rate,
+            "meeting_recovery_fit": intel.meeting_recovery_fit,
+            "meeting_count": intel.meeting_count,
+            "total_meeting_minutes": intel.total_meeting_minutes,
+            "free_gap_minutes": intel.free_gap_minutes,
+            "peak_focus_threats": intel.peak_focus_threats,
+            "headline": intel.headline,
+            "advisory": intel.advisory,
+            # Pre-formatted Slack section so format_digest_message doesn't
+            # need to re-import the module.
+            "section": format_meeting_intel_section(intel),
+        }
+    except Exception:
+        return None  # Never crash the digest over meeting intel
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -789,6 +832,9 @@ def compute_digest(windows: list[dict]) -> dict:
         # v1.9: Tomorrow's focus plan — specific deep-work blocks for tomorrow
         # (None when calendar unavailable or focus planner fails)
         "tomorrow_focus_plan": _compute_focus_plan_for_digest(date_str),
+        # v2.0: Meeting Intelligence — FFS, CMC, SDR, MIS, recovery fit
+        # (None when no meetings or meeting_intel fails)
+        "meeting_intel": _compute_meeting_intel_for_digest(windows, date_str),
     }
 
 
@@ -981,6 +1027,7 @@ def format_digest_message(digest: dict) -> str:
     peak_focus_fdi = digest.get("peak_focus_fdi")     # v1.6
     cognitive_debt = digest.get("cognitive_debt")     # v1.7: CDI dict or None
     presence_score = digest.get("presence_score")     # v1.8: DPS dict or None
+    meeting_intel = digest.get("meeting_intel")       # v2.0: Meeting Intel dict or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1202,6 +1249,14 @@ def format_digest_message(digest: dict) -> str:
         if cdi_line:
             lines.append("")
             lines.append(f"_{cdi_line}_")
+
+    # ── Meeting Intelligence (v2.0) ───────────────────────────────────────
+    # Only rendered when the day had meetings AND the module produced meaningful
+    # output (MIS, FFS, CMC, SDR).  The pre-formatted section is used directly
+    # so we keep all rendering logic inside meeting_intel.py.
+    if meeting_intel and meeting_intel.get("section"):
+        lines.append("")
+        lines.append(meeting_intel["section"])
 
     # ── Insight ──
     if insight:

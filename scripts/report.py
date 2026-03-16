@@ -674,6 +674,24 @@ def print_full(report: dict, show_windows: bool = False) -> None:
             dur = b["windows"] * 15
             ppl = f"  {b['attendees']} attendees" if b["attendees"] > 1 else ""
             print(f"  {b['start']}  {b['title'][:35]}  ({dur} min){ppl}")
+        # ── Meeting Intelligence (v13 integration) ──────────────────────
+        # Show MIS + component breakdown when the day had meetings.
+        # Gracefully skipped when meeting_intel module is unavailable.
+        try:
+            from analysis.meeting_intel import compute_meeting_intel, format_meeting_intel_terminal
+            _whoop_data: dict = {}
+            for _w in windows:
+                _wd = _w.get("whoop") or {}
+                if _wd.get("recovery_score") is not None:
+                    _whoop_data = _wd
+                    break
+            _intel = compute_meeting_intel(windows, _whoop_data, report["date"])
+            if _intel.is_meaningful:
+                print()
+                print(_c("  Meeting Intelligence", BOLD))
+                print(format_meeting_intel_terminal(_intel))
+        except Exception:
+            pass  # Non-critical: never crash report over meeting intel
         print()
     else:
         print(_c("  ⑤ Calendar", BOLD))
