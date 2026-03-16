@@ -11,6 +11,7 @@ Sends David a morning Slack DM at 07:00 Budapest time with:
 - Cognitive Debt Index — accumulated fatigue signal (v8.0)
 - DPS trend — cognitive day quality trajectory over last 7 days (v9.0)
 - Predicted Cognitive Load Forecast — expected CLS based on today's calendar (v14.0)
+- Cognitive Rhythm hint — peak focus hours, morning/afternoon bias, best day-of-week (v18.0)
 
 This is the forward-looking complement to the end-of-day digest.
 The digest tells you how the day went; the morning brief tells you
@@ -647,6 +648,14 @@ def compute_morning_brief(
             today_date,
             whoop_data=whoop_data,
         ),
+        # v18.0: Cognitive Rhythm — when in the day does David do his best thinking?
+        # Surfaces peak focus hours, morning/afternoon bias, and day-of-week pattern
+        # in a compact one-liner each morning.  Answers: "When should I schedule hard
+        # work today?"  Derived from accumulated JSONL history — becomes meaningful
+        # after MIN_DAYS_FOR_RHYTHM (3) days.  Shown as a compact hint below the
+        # schedule, not as a prominent section, so it doesn't overwhelm the brief.
+        # Returns None when insufficient history (graceful degradation).
+        "cognitive_rhythm": _compute_cognitive_rhythm_for_brief(today_date),
     }
 
 
@@ -851,6 +860,43 @@ def _compute_cognitive_budget_for_brief(
             "guidance": budget.guidance,
             "line": format_budget_line(budget),
             "section": format_budget_section(budget),
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_cognitive_rhythm_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute the cognitive rhythm summary for the morning brief.
+
+    Returns a compact dict with the one-liner and key rhythm signals,
+    or None when not meaningful (insufficient data or error).
+
+    v18.0: Added cognitive rhythm to morning brief.
+    """
+    try:
+        from analysis.cognitive_rhythm import (
+            compute_cognitive_rhythm,
+            format_rhythm_line,
+            DOW_LABELS,
+        )
+
+        rhythm = compute_cognitive_rhythm(date_str)
+        if not rhythm.is_meaningful:
+            return None
+
+        line = format_rhythm_line(rhythm)
+        if not line:
+            return None
+
+        return {
+            "line": line,
+            "peak_focus_hours": rhythm.peak_focus_hours,
+            "morning_bias": rhythm.morning_bias,
+            "best_focus_dow": DOW_LABELS[rhythm.best_focus_dow] if rhythm.best_focus_dow is not None else None,
+            "hourly_fdi_sparkline": rhythm.hourly_fdi_sparkline,
+            "days_analyzed": rhythm.days_analyzed,
             "is_meaningful": True,
         }
     except Exception:
@@ -1124,6 +1170,18 @@ def format_morning_brief_message(brief: dict) -> str:
             if len(events_summary) > 5:
                 remaining = len(events_summary) - 5
                 lines.append(f"  _(+{remaining} more)_")
+
+    # ── Cognitive Rhythm hint (v18.0) ─────────────────────────────────────
+    # One compact line at the bottom of the brief: "Peak focus 9am–11am ·
+    # morning-biased · Best day: Wednesday" — derived from historical data.
+    # Placed last so it doesn't compete with the actionable signals above,
+    # but is available for the motivated reader who wants to plan optimally.
+    cognitive_rhythm = brief.get("cognitive_rhythm")
+    if cognitive_rhythm and cognitive_rhythm.get("is_meaningful"):
+        rhythm_line = cognitive_rhythm.get("line", "")
+        if rhythm_line:
+            lines.append("")
+            lines.append(f"_{rhythm_line}_")
 
     return "\n".join(lines)
 

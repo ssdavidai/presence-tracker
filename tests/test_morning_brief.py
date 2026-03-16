@@ -994,3 +994,194 @@ class TestComputeDpsTrendForBrief:
         assert "recent_scores" in result
         # Last 3 meaningful: 65, 70, 75
         assert result["recent_scores"] == [65, 70, 75]
+
+
+# ─── Cognitive Rhythm integration (v18.0) ────────────────────────────────────
+
+class TestComputeCognitiveRhythmForBrief:
+    """Unit tests for _compute_cognitive_rhythm_for_brief()."""
+
+    def test_returns_none_when_not_meaningful(self, monkeypatch):
+        """Returns None when rhythm has is_meaningful=False (insufficient data)."""
+        import analysis.cognitive_rhythm as cr_mod
+        from analysis.cognitive_rhythm import CognitiveRhythm
+        not_meaningful = CognitiveRhythm(is_meaningful=False, days_analyzed=0)
+        monkeypatch.setattr(cr_mod, "compute_cognitive_rhythm", lambda *a, **kw: not_meaningful)
+        from analysis.morning_brief import _compute_cognitive_rhythm_for_brief
+        result = _compute_cognitive_rhythm_for_brief("2026-03-14")
+        assert result is None
+
+    def test_returns_dict_when_meaningful(self, monkeypatch):
+        """Returns a dict when rhythm data is meaningful."""
+        import analysis.cognitive_rhythm as cr_mod
+        from analysis.cognitive_rhythm import CognitiveRhythm
+        rhythm = CognitiveRhythm(
+            is_meaningful=True,
+            days_analyzed=10,
+            peak_focus_hours=[9, 10, 11],
+            low_load_hours=[14, 15, 16],
+            morning_bias="morning",
+            best_focus_dow=2,  # Wednesday
+            hourly_fdi_sparkline="▁▂▄▇█▇▅▄▃▃▂▂▂",
+            dow_fdi_sparkline="▃▅▇▅▃▁▁",
+            date_range="2026-03-04 → 2026-03-14",
+        )
+        monkeypatch.setattr(cr_mod, "compute_cognitive_rhythm", lambda *a, **kw: rhythm)
+        from analysis.morning_brief import _compute_cognitive_rhythm_for_brief
+        result = _compute_cognitive_rhythm_for_brief("2026-03-14")
+        assert result is not None
+        assert result["is_meaningful"] is True
+        assert "line" in result
+        assert isinstance(result["line"], str)
+
+    def test_result_includes_peak_hours(self, monkeypatch):
+        """Result must include peak_focus_hours list."""
+        import analysis.cognitive_rhythm as cr_mod
+        from analysis.cognitive_rhythm import CognitiveRhythm
+        rhythm = CognitiveRhythm(
+            is_meaningful=True,
+            days_analyzed=5,
+            peak_focus_hours=[9, 10],
+            morning_bias="morning",
+            best_focus_dow=1,
+            hourly_fdi_sparkline="▂▄▇▆▄▃▂▁",
+            dow_fdi_sparkline="▃▅▇▅▃▁▁",
+        )
+        monkeypatch.setattr(cr_mod, "compute_cognitive_rhythm", lambda *a, **kw: rhythm)
+        from analysis.morning_brief import _compute_cognitive_rhythm_for_brief
+        result = _compute_cognitive_rhythm_for_brief("2026-03-14")
+        assert result is not None
+        assert result["peak_focus_hours"] == [9, 10]
+
+    def test_graceful_on_exception(self, monkeypatch):
+        """Any exception returns None without crashing."""
+        import analysis.cognitive_rhythm as cr_mod
+        monkeypatch.setattr(
+            cr_mod, "compute_cognitive_rhythm",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated failure")),
+        )
+        from analysis.morning_brief import _compute_cognitive_rhythm_for_brief
+        result = _compute_cognitive_rhythm_for_brief("2026-03-14")
+        assert result is None
+
+    def test_returns_none_when_line_is_empty(self, monkeypatch):
+        """Returns None when format_rhythm_line produces empty string."""
+        import analysis.cognitive_rhythm as cr_mod
+        from analysis.cognitive_rhythm import CognitiveRhythm
+        rhythm = CognitiveRhythm(
+            is_meaningful=True,
+            days_analyzed=3,
+            peak_focus_hours=[],  # no peak hours → empty line
+            morning_bias=None,
+            best_focus_dow=None,
+        )
+        monkeypatch.setattr(cr_mod, "compute_cognitive_rhythm", lambda *a, **kw: rhythm)
+        from analysis.morning_brief import _compute_cognitive_rhythm_for_brief
+        result = _compute_cognitive_rhythm_for_brief("2026-03-14")
+        # With no peak hours and no bias, format_rhythm_line returns ""
+        # The helper should return None
+        assert result is None
+
+    def test_message_contains_rhythm_line(self, monkeypatch):
+        """format_morning_brief_message includes rhythm when present."""
+        import analysis.cognitive_rhythm as cr_mod
+        from analysis.cognitive_rhythm import CognitiveRhythm
+        rhythm = CognitiveRhythm(
+            is_meaningful=True,
+            days_analyzed=7,
+            peak_focus_hours=[9, 10, 11],
+            morning_bias="morning",
+            best_focus_dow=2,
+            hourly_fdi_sparkline="▂▄▇▆▄▃▂▁▁▁▁▁▁",
+            dow_fdi_sparkline="▃▅▇▅▃▁▁",
+        )
+        monkeypatch.setattr(cr_mod, "compute_cognitive_rhythm", lambda *a, **kw: rhythm)
+
+        brief = {
+            "date": "2026-03-14",
+            "whoop": {
+                "recovery_score": 85.0,
+                "hrv_rmssd_milli": 72.0,
+                "sleep_hours": 8.0,
+                "sleep_performance": 88.0,
+                "resting_heart_rate": 54.0,
+            },
+            "readiness": {"tier": "peak", "label": "Peak", "recommendation": "Go hard."},
+            "yesterday": {},
+            "hrv_baseline": 70.0,
+            "trend_context": {},
+            "cognitive_debt": None,
+            "cognitive_budget": None,
+            "dps_trend": None,
+            "load_forecast": None,
+            "tomorrow_focus_plan": None,
+            "today_calendar": None,
+            "cognitive_rhythm": {
+                "line": "⏱ *Rhythm:* Peak focus 9am–10am · morning-biased · Best day: Wed",
+                "peak_focus_hours": [9, 10, 11],
+                "morning_bias": "morning",
+                "best_focus_dow": "Wed",
+                "hourly_fdi_sparkline": "▂▄▇▆▄▃▂▁▁▁▁▁▁",
+                "days_analyzed": 7,
+                "is_meaningful": True,
+            },
+        }
+        from analysis.morning_brief import format_morning_brief_message
+        msg = format_morning_brief_message(brief)
+        assert "Rhythm" in msg
+        assert "Peak focus" in msg
+
+    def test_message_omits_rhythm_when_none(self):
+        """format_morning_brief_message omits rhythm section when cognitive_rhythm is None."""
+        brief = {
+            "date": "2026-03-14",
+            "whoop": {
+                "recovery_score": 85.0,
+                "hrv_rmssd_milli": 72.0,
+                "sleep_hours": 8.0,
+                "sleep_performance": 88.0,
+                "resting_heart_rate": 54.0,
+            },
+            "readiness": {"tier": "peak", "label": "Peak", "recommendation": "Go hard."},
+            "yesterday": {},
+            "hrv_baseline": 70.0,
+            "trend_context": {},
+            "cognitive_debt": None,
+            "cognitive_budget": None,
+            "dps_trend": None,
+            "load_forecast": None,
+            "tomorrow_focus_plan": None,
+            "today_calendar": None,
+            "cognitive_rhythm": None,
+        }
+        from analysis.morning_brief import format_morning_brief_message
+        msg = format_morning_brief_message(brief)
+        assert "Rhythm" not in msg
+
+    def test_compute_morning_brief_includes_rhythm_key(self, monkeypatch):
+        """compute_morning_brief dict always has a 'cognitive_rhythm' key."""
+        import analysis.cognitive_rhythm as cr_mod
+        from analysis.cognitive_rhythm import CognitiveRhythm
+        not_meaningful = CognitiveRhythm(is_meaningful=False)
+        monkeypatch.setattr(cr_mod, "compute_cognitive_rhythm", lambda *a, **kw: not_meaningful)
+
+        # Mock out all the side-effect helpers
+        import analysis.morning_brief as mb_mod
+        monkeypatch.setattr(mb_mod, "_compute_cdi_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_dps_trend_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_focus_plan_for_brief", lambda *a, **kw: None)
+        monkeypatch.setattr(mb_mod, "_compute_load_forecast_for_brief", lambda *a, **kw: None)
+        monkeypatch.setattr(mb_mod, "_compute_cognitive_budget_for_brief", lambda *a, **kw: None)
+
+        from analysis.morning_brief import compute_morning_brief
+        result = compute_morning_brief(
+            today_date="2026-03-14",
+            whoop_data={
+                "recovery_score": 85.0,
+                "hrv_rmssd_milli": 72.0,
+                "sleep_hours": 8.0,
+                "sleep_performance": 88.0,
+                "resting_heart_rate": 54.0,
+            },
+        )
+        assert "cognitive_rhythm" in result
