@@ -743,6 +743,31 @@ def compute_digest(windows: list[dict]) -> dict:
     else:
         rescuetime_digest = None
 
+    # ── Personal records (v2.1) ───────────────────────────────────────────
+    # Checks whether today set any all-time personal bests or notable streaks.
+    # Gracefully returns None when insufficient history (< 2 days).
+    personal_records_today = None
+    try:
+        from analysis.personal_records import (
+            compute_personal_records,
+            check_today_records,
+            format_records_line,
+        )
+        _all_records = compute_personal_records(date_str)
+        _today_summary = check_today_records(date_str, _all_records)
+        if _today_summary.has_records:
+            personal_records_today = {
+                "new_bests": _today_summary.all_new_bests(),
+                "active_streaks": [
+                    {"name": n, "days": d}
+                    for n, d in _today_summary.active_streaks()
+                ],
+                "new_streak_records": _today_summary.new_streak_records,
+                "line": format_records_line(_today_summary),
+            }
+    except Exception:
+        pass  # Never crash the digest over personal records
+
     # ── Multi-day trend context ────────────────────────────────────────────
     # Loads recent history to detect streaks and baseline deviations.
     # Gracefully returns {} if no history is available yet.
@@ -835,6 +860,9 @@ def compute_digest(windows: list[dict]) -> dict:
         # v2.0: Meeting Intelligence — FFS, CMC, SDR, MIS, recovery fit
         # (None when no meetings or meeting_intel fails)
         "meeting_intel": _compute_meeting_intel_for_digest(windows, date_str),
+        # v2.1: Personal Records — new all-time bests and streak milestones
+        # (None when no records set today or insufficient history)
+        "personal_records": personal_records_today,
     }
 
 
@@ -1257,6 +1285,14 @@ def format_digest_message(digest: dict) -> str:
     if meeting_intel and meeting_intel.get("section"):
         lines.append("")
         lines.append(meeting_intel["section"])
+
+    # ── Personal Records (v2.1) ───────────────────────────────────────────
+    # Celebrate new personal bests and notable streaks.
+    # Only shown when at least one record was set or a streak is active.
+    personal_records = digest.get("personal_records")
+    if personal_records and personal_records.get("line"):
+        lines.append("")
+        lines.append(personal_records["line"])
 
     # ── Insight ──
     if insight:
