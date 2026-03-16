@@ -81,6 +81,36 @@ v1.9 — Tomorrow's focus plan in the nightly digest:
 
   Degrades gracefully: if calendar data or focus planner fails, the section is
   silently omitted — it is never load-bearing for the rest of the digest.
+
+v2.2 — ML model insights in the nightly digest:
+  The ML model layer (Isolation Forest anomaly detector + Random Forest recovery
+  predictor) has been trained since v3 but its outputs were never surfaced to
+  David.  This release wires both into the nightly digest.
+
+  1. Recovery prediction — when the Random Forest recovery predictor is trained
+     (requires ≥ 14 day-pairs), the digest includes:
+       "🤖 Tomorrow's recovery: ~72% (high confidence)"
+     This forward-looking signal lets David adjust tonight's wind-down routine.
+     Degrades silently when the model isn't trained (< 14 data days).
+
+  2. Anomaly detection — the Isolation Forest flags unusual 15-min windows
+     (atypical combinations of CLS, FDI, RAS, meetings, Slack).  When ≥ 2
+     anomalous windows are found in a cluster (consecutive hours), the digest
+     surfaces a compact note:
+       "🔍 Unusual pattern detected at 14:00–15:30 (3 anomalous windows)"
+     This draws David's attention to atypical cognitive states — periods that
+     don't fit his normal behavioral patterns and may deserve reflection.
+     Shown only when the model is trained and ≥ 2 anomalies are detected.
+
+  Both additions use only the existing ml_model.py infrastructure — no new
+  collectors, no new training pipelines.  Both degrade gracefully when models
+  are not yet trained or features cannot be extracted.
+
+  Implementation:
+  - _compute_ml_insights_for_digest(windows) — exception-isolated helper
+    that calls detect_anomalies() and predict_recovery() and returns a dict
+  - compute_digest() adds "ml_insights" key to the return dict
+  - format_digest_message() renders the ML insights section after CDI
 """
 
 import json
@@ -555,6 +585,122 @@ def _compute_meeting_intel_for_digest(windows: list[dict], date_str: str) -> Opt
         return None  # Never crash the digest over meeting intel
 
 
+def _compute_ml_insights_for_digest(windows: list[dict]) -> Optional[dict]:
+    """
+    Compute ML model insights for the nightly digest (v2.2).
+
+    Runs two ML inference passes:
+      1. Isolation Forest anomaly detection — finds unusual 15-min windows
+      2. Random Forest recovery prediction — predicts tomorrow's WHOOP recovery
+
+    Both calls are fully exception-isolated; if either model is not trained
+    or inference fails, the result is silently omitted (None returned for
+    that sub-key).
+
+    Returns a dict:
+        {
+            "recovery_prediction": {
+                "predicted_recovery": float,
+                "confidence": str,         # "high" | "medium" | "low"
+                "prediction_std": float,
+            } | None,
+            "anomalies": [
+                {
+                    "window_id": str,
+                    "hour_of_day": int,
+                    "anomaly_score": float,
+                    "features": dict,
+                }
+            ],
+            "anomaly_clusters": [
+                {
+                    "start_hour": int,
+                    "end_hour": int,
+                    "count": int,
+                    "description": str,   # e.g. "3 anomalous windows, 14:00–15:00"
+                }
+            ],
+            "is_meaningful": bool,        # True when at least one signal is present
+        }
+
+    Returns None if both models are unavailable or all windows are empty.
+    """
+    try:
+        from analysis.ml_model import detect_anomalies, predict_recovery
+
+        # ── Recovery prediction ────────────────────────────────────────────
+        recovery_pred: Optional[dict] = None
+        try:
+            recovery_pred = predict_recovery(windows)
+        except Exception:
+            pass  # Model not trained — silently skip
+
+        # ── Anomaly detection ──────────────────────────────────────────────
+        raw_anomalies: list[dict] = []
+        try:
+            raw_anomalies = detect_anomalies(windows)
+        except Exception:
+            pass  # Model not trained — silently skip
+
+        # ── Cluster anomalies by consecutive hour ─────────────────────────
+        # Group anomalous windows that fall in the same or adjacent hour into
+        # a single cluster so the digest shows "14:00–15:30 (3 windows)"
+        # instead of three separate lines.
+        anomaly_clusters: list[dict] = []
+        if raw_anomalies:
+            # Sort by hour then by window_id for stable ordering
+            sorted_anoms = sorted(raw_anomalies, key=lambda a: (a["hour_of_day"], a["window_id"]))
+
+            # Group: a new cluster starts when the hour jumps by > 1
+            current_cluster: list[dict] = [sorted_anoms[0]]
+            for anm in sorted_anoms[1:]:
+                last_hour = current_cluster[-1]["hour_of_day"]
+                if anm["hour_of_day"] <= last_hour + 1:
+                    current_cluster.append(anm)
+                else:
+                    anomaly_clusters.append(current_cluster)
+                    current_cluster = [anm]
+            anomaly_clusters.append(current_cluster)
+
+            # Convert to dicts with human-readable descriptions
+            cluster_dicts = []
+            for cluster in anomaly_clusters:
+                start_h = cluster[0]["hour_of_day"]
+                end_h = cluster[-1]["hour_of_day"] + 1
+                n = len(cluster)
+                cluster_dicts.append({
+                    "start_hour": start_h,
+                    "end_hour": end_h,
+                    "count": n,
+                    "description": (
+                        f"{n} anomalous window{'s' if n != 1 else ''} "
+                        f"at {start_h:02d}:00–{end_h:02d}:00"
+                    ),
+                })
+            anomaly_clusters = cluster_dicts
+
+        # ── Determine meaningfulness ───────────────────────────────────────
+        has_recovery = recovery_pred is not None
+        # Only surface anomaly clusters with ≥ 2 windows to avoid noise
+        significant_clusters = [c for c in anomaly_clusters if c["count"] >= 2]
+        has_anomalies = len(significant_clusters) >= 1
+
+        is_meaningful = has_recovery or has_anomalies
+
+        if not is_meaningful:
+            return None
+
+        return {
+            "recovery_prediction": recovery_pred,
+            "anomalies": raw_anomalies,
+            "anomaly_clusters": significant_clusters,
+            "is_meaningful": is_meaningful,
+        }
+
+    except Exception:
+        return None  # Never crash the digest over ML insights
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -863,6 +1009,9 @@ def compute_digest(windows: list[dict]) -> dict:
         # v2.1: Personal Records — new all-time bests and streak milestones
         # (None when no records set today or insufficient history)
         "personal_records": personal_records_today,
+        # v2.2: ML model insights — recovery prediction + anomaly detection
+        # (None when models not trained or both signals are absent)
+        "ml_insights": _compute_ml_insights_for_digest(windows),
     }
 
 
@@ -1056,6 +1205,7 @@ def format_digest_message(digest: dict) -> str:
     cognitive_debt = digest.get("cognitive_debt")     # v1.7: CDI dict or None
     presence_score = digest.get("presence_score")     # v1.8: DPS dict or None
     meeting_intel = digest.get("meeting_intel")       # v2.0: Meeting Intel dict or None
+    ml_insights = digest.get("ml_insights")           # v2.2: ML model insights or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1277,6 +1427,38 @@ def format_digest_message(digest: dict) -> str:
         if cdi_line:
             lines.append("")
             lines.append(f"_{cdi_line}_")
+
+    # ── ML Model Insights (v2.2) ─────────────────────────────────────────
+    # Surface ML-derived signals: recovery prediction and behavioral anomalies.
+    # Both are hidden by default (model not trained early on) — surfaced once
+    # enough data has been collected.
+    #
+    # Recovery prediction: "🤖 Tomorrow's recovery: ~72% (high confidence)"
+    #   Shown when the Random Forest recovery predictor is trained.
+    #   Lets David adjust tonight's wind-down based on predicted tomorrow.
+    #
+    # Anomaly clusters: "🔍 Unusual pattern at 14:00–15:00 (2 anomalous windows)"
+    #   Shown when ≥ 2 anomalous windows form a cluster.
+    #   Draws attention to periods that don't fit David's behavioral fingerprint.
+    if ml_insights and ml_insights.get("is_meaningful"):
+        ml_lines = []
+
+        recovery_pred = ml_insights.get("recovery_prediction")
+        if recovery_pred and recovery_pred.get("predicted_recovery") is not None:
+            predicted = round(recovery_pred["predicted_recovery"])
+            confidence = recovery_pred.get("confidence", "")
+            confidence_str = f" ({confidence} confidence)" if confidence else ""
+            ml_lines.append(f"🤖 Tomorrow's recovery: ~{predicted}%{confidence_str}")
+
+        for cluster in (ml_insights.get("anomaly_clusters") or []):
+            desc = cluster.get("description", "")
+            if desc:
+                ml_lines.append(f"🔍 {desc}")
+
+        if ml_lines:
+            lines.append("")
+            for ml_line in ml_lines:
+                lines.append(f"_{ml_line}_")
 
     # ── Meeting Intelligence (v2.0) ───────────────────────────────────────
     # Only rendered when the day had meetings AND the module produced meaningful

@@ -656,6 +656,11 @@ def compute_morning_brief(
         # schedule, not as a prominent section, so it doesn't overwhelm the brief.
         # Returns None when insufficient history (graceful degradation).
         "cognitive_rhythm": _compute_cognitive_rhythm_for_brief(today_date),
+        # v19.0: ML recovery prediction validation — how accurate was yesterday's
+        # prediction vs today's actual WHOOP recovery?  Builds model trust over time.
+        # Shows prediction vs actuals when the Random Forest predictor is trained.
+        # Returns None when model not trained or yesterday has no data.
+        "ml_recovery": _compute_ml_recovery_for_brief(today_date, whoop_data),
     }
 
 
@@ -861,6 +866,86 @@ def _compute_cognitive_budget_for_brief(
             "line": format_budget_line(budget),
             "section": format_budget_section(budget),
             "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_ml_recovery_for_brief(today_date: str, today_whoop: dict) -> Optional[dict]:
+    """
+    Surface ML recovery prediction in the morning brief (v19.0).
+
+    Reads yesterday's JSONL windows and runs predict_recovery() to get what the
+    model predicted for today.  Then compares against actual WHOOP recovery to
+    close the feedback loop: David sees if the model was right.
+
+    Returns a dict:
+        {
+            "predicted_recovery": float,
+            "actual_recovery": float | None,
+            "accuracy": str,          # "accurate" | "optimistic" | "pessimistic" | None
+            "error": float | None,    # predicted - actual (signed)
+            "confidence": str,
+            "line": str,              # formatted one-liner for the brief
+        }
+
+    Returns None when:
+    - Recovery predictor model is not trained yet
+    - Yesterday has no JSONL data
+    - Feature extraction fails
+    """
+    try:
+        from datetime import datetime, timedelta
+        from engine.store import read_day as _read_day
+        from analysis.ml_model import predict_recovery
+
+        # Read yesterday's windows
+        yesterday = (datetime.strptime(today_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday_windows = _read_day(yesterday)
+        if not yesterday_windows:
+            return None
+
+        pred = predict_recovery(yesterday_windows)
+        if pred is None:
+            return None
+
+        predicted = round(pred["predicted_recovery"])
+        confidence = pred.get("confidence", "")
+
+        # Compare against today's actual WHOOP recovery
+        actual = today_whoop.get("recovery_score") if today_whoop else None
+        accuracy: Optional[str] = None
+        error: Optional[float] = None
+
+        if actual is not None:
+            error = round(predicted - actual, 1)
+            abs_err = abs(error)
+            if abs_err <= 8:
+                accuracy = "accurate"
+            elif error > 0:
+                accuracy = "optimistic"  # model over-predicted
+            else:
+                accuracy = "pessimistic"  # model under-predicted
+
+        # Format the line
+        conf_str = f" ({confidence} confidence)" if confidence else ""
+        if actual is not None and accuracy is not None:
+            err_str = f"{'+' if error >= 0 else ''}{error:.0f}%" if error is not None else ""
+            accuracy_emoji = {"accurate": "✓", "optimistic": "↓", "pessimistic": "↑"}.get(accuracy, "")
+            line = (
+                f"🤖 ML predicted yesterday's recovery at {predicted}%{conf_str} — "
+                f"actual: {actual:.0f}% {accuracy_emoji}{err_str}"
+            )
+        else:
+            line = f"🤖 ML predicted today's recovery: ~{predicted}%{conf_str}"
+
+        return {
+            "predicted_recovery": predicted,
+            "actual_recovery": actual,
+            "accuracy": accuracy,
+            "error": error,
+            "confidence": confidence,
+            "line": line,
         }
     except Exception:
         return None
@@ -1182,6 +1267,17 @@ def format_morning_brief_message(brief: dict) -> str:
         if rhythm_line:
             lines.append("")
             lines.append(f"_{rhythm_line}_")
+
+    # ── ML Recovery Prediction Validation (v19.0) ─────────────────────────
+    # Show ML-predicted vs actual recovery to build model trust over time.
+    # Only shown when the recovery predictor is trained (≥ 14 data days).
+    # Example: "🤖 ML predicted yesterday's recovery at 72% (high) — actual: 75% ✓+3%"
+    ml_recovery = brief.get("ml_recovery")
+    if ml_recovery:
+        ml_line = ml_recovery.get("line", "")
+        if ml_line:
+            lines.append("")
+            lines.append(f"_{ml_line}_")
 
     return "\n".join(lines)
 
