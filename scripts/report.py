@@ -73,6 +73,9 @@ Examples:
 
     # Weekly summary for a specific week end date
     python3 scripts/report.py --week 2026-03-14
+
+    # Cognitive rhythm profile (hourly + day-of-week patterns across all history)
+    python3 scripts/report.py --rhythm
 """
 
 import argparse
@@ -1559,7 +1562,18 @@ def main() -> None:
         "--week", action="store_true",
         help="Show full terminal weekly summary (last 7 days ending on DATE, or today)",
     )
+    parser.add_argument(
+        "--rhythm", action="store_true",
+        help="Show cognitive rhythm profile: hourly and day-of-week patterns across all history",
+    )
     args = parser.parse_args()
+
+    # ── Rhythm mode ───────────────────────────────────────────────────────────
+    if args.rhythm:
+        from analysis.cognitive_rhythm import compute_cognitive_rhythm, format_rhythm_terminal
+        rhythm = compute_cognitive_rhythm(args.date)
+        print(format_rhythm_terminal(rhythm))
+        return
 
     # ── Week mode ─────────────────────────────────────────────────────────────
     if args.week:

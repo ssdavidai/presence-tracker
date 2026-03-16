@@ -700,6 +700,17 @@ def format_weekly_message(summary: dict) -> str:
         else:
             lines.append("  Stable week — no significant changes vs last week")
 
+    # ── Cognitive Rhythm insight ──────────────────────────────────────────────
+    try:
+        from analysis.cognitive_rhythm import compute_cognitive_rhythm, format_rhythm_line
+        rhythm = compute_cognitive_rhythm(as_of_date_str=end_date_str)
+        rhythm_line = format_rhythm_line(rhythm)
+        if rhythm_line:
+            lines.append("")
+            lines.append(rhythm_line)
+    except Exception:
+        pass  # rhythm is non-critical — never block the weekly summary
+
     lines.append("")
     lines.append("_Presence Tracker · weekly summary_")
 
