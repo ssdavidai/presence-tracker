@@ -111,6 +111,36 @@ v2.2 — ML model insights in the nightly digest:
     that calls detect_anomalies() and predict_recovery() and returns a dict
   - compute_digest() adds "ml_insights" key to the return dict
   - format_digest_message() renders the ML insights section after CDI
+
+v2.3 — Tomorrow's load forecast in the nightly digest:
+  The nightly digest already shows tomorrow's focus plan (since v1.9) but gave
+  no context about *how cognitively demanding* tomorrow will be.  That context
+  is exactly what the load forecast provides.
+
+  This release pairs the two into a unified "Tomorrow" section:
+    *Tomorrow*
+    📊 Load forecast: Moderate — CLS ~0.42 (8 similar days)
+    _2h30m of meetings → moderate load expected (CLS ~0.42). Front-load focused work._
+
+    *🎯 Tomorrow's Focus Plan:*
+    • 9:00–10:30  _(90min, peak focus hour)_  🔥
+    ...
+
+  The forecast is computed for *tomorrow's date* (today+1), using tomorrow's
+  calendar and the same historical-bucket logic as the morning brief.
+
+  Graceful degradation:
+  - If the forecast is not meaningful (insufficient history, no calendar), the
+    "Tomorrow" header and narrative are omitted — only the focus plan shows.
+  - If *neither* forecast nor focus plan is meaningful, the section is omitted.
+  - All compute paths are exception-isolated; the digest never crashes over this.
+
+  Implementation:
+  - _compute_load_forecast_for_digest(today_date_str) — new helper that
+    fetches tomorrow's calendar, calls compute_load_forecast(tomorrow_str, ...),
+    and returns a serialised dict
+  - compute_digest() adds "tomorrow_load_forecast" key to the return dict
+  - format_digest_message() renders both in a combined "Tomorrow" section
 """
 
 import json
@@ -701,6 +731,68 @@ def _compute_ml_insights_for_digest(windows: list[dict]) -> Optional[dict]:
         return None  # Never crash the digest over ML insights
 
 
+def _compute_load_forecast_for_digest(today_date_str: str) -> Optional[dict]:
+    """
+    Compute tomorrow's predicted cognitive load for the nightly digest (v2.3).
+
+    Mirrors the logic used in the morning brief, but placed in the *evening*
+    digest so David can see tomorrow's expected load at the same time as the
+    focus plan — giving a complete tomorrow preview in one glance.
+
+    The morning brief already shows today's load forecast; the nightly digest
+    now shows *tomorrow's* predicted load (i.e. the forecast for date+1).
+
+    Returns a dict with:
+      - line:           Slack-ready formatted line, e.g. "📊 Load forecast: Moderate..."
+      - predicted_cls:  float
+      - load_label:     str ("Very light" | "Light" | "Moderate" | "High" | "Very high")
+      - confidence:     str ("high" | "medium" | "low")
+      - meeting_minutes: int
+      - narrative:      str — one actionable sentence
+      - is_meaningful:  bool
+
+    Returns None on error or when the forecast is not meaningful.
+    Fully exception-isolated — never crashes the digest.
+    """
+    try:
+        from datetime import timedelta
+
+        tomorrow_dt = datetime.strptime(today_date_str, "%Y-%m-%d") + timedelta(days=1)
+        tomorrow_str = tomorrow_dt.strftime("%Y-%m-%d")
+
+        # Try to load tomorrow's calendar for meeting load context
+        tomorrow_calendar = None
+        try:
+            from collectors.gcal import collect as gcal_collect
+            tomorrow_calendar = gcal_collect(tomorrow_str)
+        except Exception:
+            tomorrow_calendar = None
+
+        from analysis.load_forecast import compute_load_forecast, format_forecast_line
+        # Pass tomorrow's date as the reference so the forecast is for tomorrow's load
+        forecast = compute_load_forecast(tomorrow_str, tomorrow_calendar)
+
+        if not forecast.is_meaningful:
+            return None
+
+        line = format_forecast_line(forecast)
+        if not line:
+            return None
+
+        return {
+            "line": line,
+            "predicted_cls": forecast.predicted_cls,
+            "load_label": forecast.load_label,
+            "confidence": forecast.confidence,
+            "meeting_minutes": forecast.meeting_minutes,
+            "matching_days": forecast.matching_days,
+            "narrative": forecast.narrative,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None  # Never crash the digest over load forecast
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1012,6 +1104,11 @@ def compute_digest(windows: list[dict]) -> dict:
         # v2.2: ML model insights — recovery prediction + anomaly detection
         # (None when models not trained or both signals are absent)
         "ml_insights": _compute_ml_insights_for_digest(windows),
+        # v2.3: Tomorrow's load forecast — predicted cognitive load for tomorrow
+        # based on tomorrow's calendar and historical CLS patterns.
+        # Shown alongside tomorrow's focus plan for a complete tomorrow preview.
+        # (None when insufficient history or no calendar data)
+        "tomorrow_load_forecast": _compute_load_forecast_for_digest(date_str),
     }
 
 
@@ -1206,6 +1303,7 @@ def format_digest_message(digest: dict) -> str:
     presence_score = digest.get("presence_score")     # v1.8: DPS dict or None
     meeting_intel = digest.get("meeting_intel")       # v2.0: Meeting Intel dict or None
     ml_insights = digest.get("ml_insights")           # v2.2: ML model insights or None
+    tomorrow_load_forecast = digest.get("tomorrow_load_forecast")  # v2.3: tomorrow load forecast or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1481,14 +1579,37 @@ def format_digest_message(digest: dict) -> str:
         lines.append("")
         lines.append(f"💡 {insight}")
 
-    # ── Tomorrow's Focus Plan (v1.9) ──────────────────────────────────────
-    # Forward-looking: show recommended deep-work blocks for tomorrow so
-    # David can prepare tonight — adjust calendar, set intentions, go to sleep
-    # knowing when his best focus windows are.
-    # Only shown when the focus planner has meaningful data (calendar + history).
-    # Note: format_focus_plan_section() already includes the section header.
+    # ── Tomorrow Preview (v2.3) ───────────────────────────────────────────
+    # Combine load forecast + focus plan into a unified tomorrow preview section.
+    # Placed at the bottom of the digest so David ends with forward-looking info.
+    #
+    # Load forecast (new in v2.3): "Tomorrow looks like a Moderate day (CLS ~0.45)"
+    # Focus plan (v1.9): specific deep-work blocks for tomorrow
+    #
+    # Both are individually optional — shown only when meaningful data exists.
     tomorrow_focus_plan = digest.get("tomorrow_focus_plan")
-    if tomorrow_focus_plan and tomorrow_focus_plan.get("is_meaningful") and tomorrow_focus_plan.get("section"):
+    has_tomorrow_load = tomorrow_load_forecast and tomorrow_load_forecast.get("is_meaningful")
+    has_tomorrow_plan = tomorrow_focus_plan and tomorrow_focus_plan.get("is_meaningful") and tomorrow_focus_plan.get("section")
+
+    if has_tomorrow_load or has_tomorrow_plan:
+        lines.append("")
+        lines.append("*Tomorrow*")
+
+        if has_tomorrow_load:
+            forecast_line = tomorrow_load_forecast.get("line", "")
+            if forecast_line:
+                lines.append(forecast_line)
+            # Show the narrative as additional context if present and different from the line
+            narrative = tomorrow_load_forecast.get("narrative", "")
+            if narrative:
+                lines.append(f"_{narrative}_")
+
+        if has_tomorrow_plan:
+            if has_tomorrow_load:
+                lines.append("")
+            lines.append(tomorrow_focus_plan["section"])
+    elif tomorrow_focus_plan and tomorrow_focus_plan.get("is_meaningful") and tomorrow_focus_plan.get("section"):
+        # Legacy path: focus plan without load forecast
         lines.append("")
         lines.append(tomorrow_focus_plan["section"])
 
