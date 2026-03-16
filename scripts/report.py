@@ -463,6 +463,8 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "meeting_intel": _compute_meeting_intel(windows, date_str),
         # Cognitive Debt Index (CDI) — multi-day fatigue accumulation
         "cognitive_debt": _compute_cdi_for_report(date_str),
+        # Daily Cognitive Budget (v16) — quality hours available today
+        "cognitive_budget": _compute_cognitive_budget_for_report(date_str, whoop),
     }
 
 
@@ -542,6 +544,60 @@ def _compute_cdi_for_report(date_str: str) -> Optional[dict]:
             "days_in_surplus": debt.days_in_surplus,
             "trend_5d": round(debt.trend_5d, 4) if debt.trend_5d is not None else None,
             "line": format_cdi_line(debt),
+        }
+    except Exception:
+        return None
+
+
+def _compute_cognitive_budget_for_report(date_str: str, whoop_data: dict) -> Optional[dict]:
+    """
+    Compute the Daily Cognitive Budget for the terminal report.
+
+    Returns a dict with budget hours, tier, and guidance text,
+    or None when no WHOOP data is available.
+
+    v16.0: Added to terminal report for at-a-glance budget visibility.
+    """
+    try:
+        from analysis.cognitive_budget import compute_cognitive_budget, format_budget_line
+
+        # Extract CDI tier for the modifier
+        cdi_tier: Optional[str] = None
+        try:
+            from analysis.cognitive_debt import compute_cdi
+            debt = compute_cdi(date_str)
+            if debt and debt.is_meaningful:
+                cdi_tier = debt.tier
+        except Exception:
+            pass
+
+        # Personal HRV baseline
+        hrv_baseline: Optional[float] = None
+        try:
+            from analysis.personal_baseline import get_personal_baseline
+            baseline = get_personal_baseline()
+            if baseline.hrv_mean is not None:
+                hrv_baseline = baseline.hrv_mean
+        except Exception:
+            pass
+
+        budget = compute_cognitive_budget(
+            date_str=date_str,
+            whoop_data=whoop_data,
+            cdi_tier=cdi_tier,
+            hrv_baseline=hrv_baseline,
+        )
+        if not budget.is_meaningful:
+            return None
+        return {
+            "dcb_hours": budget.dcb_hours,
+            "dcb_low": budget.dcb_low,
+            "dcb_high": budget.dcb_high,
+            "tier": budget.tier,
+            "label": budget.label,
+            "guidance": budget.guidance,
+            "line": format_budget_line(budget),
+            "is_meaningful": True,
         }
     except Exception:
         return None
@@ -743,6 +799,24 @@ def print_full(report: dict, show_windows: bool = False) -> None:
         days_used = cdi_data.get("days_used", 0)
         print(_c("  ③ Cognitive Debt Index", BOLD))
         print(_c(f"  Insufficient history ({days_used} day{'s' if days_used != 1 else ''} — needs ≥3)", DIM))
+        print()
+
+    # ── Daily Cognitive Budget (v16.0) ────────────────────────────────────────
+    # How many quality cognitive hours are available today?
+    # Combines WHOOP recovery + sleep + CDI into a concrete hours estimate.
+    budget_data = report.get("cognitive_budget")
+    if budget_data and budget_data.get("is_meaningful"):
+        dcb = budget_data["dcb_hours"]
+        dcb_low = budget_data["dcb_low"]
+        dcb_high = budget_data["dcb_high"]
+        label = budget_data["label"]
+        guidance = budget_data.get("guidance", "")
+        budget_colour = GREEN if dcb >= 6.0 else (YELLOW if dcb >= 4.0 else RED)
+        print(_c("  ③ Cognitive Budget", BOLD))
+        range_str = f"  ({dcb_low:.1f}–{dcb_high:.1f}h range)" if dcb_low != dcb_high else ""
+        print(f"  {_c(f'~{dcb:.1f}h', budget_colour)}  {label}{range_str}")
+        if guidance:
+            print(_c(f"  {guidance}", DIM))
         print()
 
     # ── Hourly Heatmap ────────────────────────────────────────────────────────

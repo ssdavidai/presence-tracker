@@ -636,6 +636,17 @@ def compute_morning_brief(
         # Complements WHOOP readiness (capacity) with a demand estimate (load forecast).
         # Returns None when < 2 days of history exist (graceful degradation).
         "load_forecast": _compute_load_forecast_for_brief(today_date, today_calendar),
+        # v16.0: Daily Cognitive Budget — concrete quality hours available today.
+        # Translates WHOOP recovery % + CDI tier + sleep into a single number:
+        # "You have ~6.0h of quality cognitive work available today."
+        # Bridges the gap between physiological capacity (WHOOP) and actionable
+        # work planning.  Anchors CDI and load forecast in a single concrete figure.
+        # _compute_cognitive_budget_for_brief fetches CDI from the store internally.
+        # Returns None when WHOOP data is unavailable (graceful degradation).
+        "cognitive_budget": _compute_cognitive_budget_for_brief(
+            today_date,
+            whoop_data=whoop_data,
+        ),
     }
 
 
@@ -775,6 +786,71 @@ def _compute_load_forecast_for_brief(
             "confidence": forecast.confidence,
             "matching_days": forecast.matching_days,
             "narrative": forecast.narrative,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_cognitive_budget_for_brief(
+    date_str: str,
+    whoop_data: Optional[dict] = None,
+) -> Optional[dict]:
+    """
+    Compute the Daily Cognitive Budget for the morning brief.
+
+    Translates WHOOP recovery + CDI + sleep into a concrete estimate of
+    quality cognitive hours available today.  Fetches CDI tier and personal
+    HRV baseline from the store internally.
+
+    Returns a dict with budget data, or None when not meaningful (no WHOOP data).
+
+    v16.0: Added cognitive budget to morning brief.
+    """
+    try:
+        from analysis.cognitive_budget import (
+            compute_cognitive_budget,
+            format_budget_line,
+            format_budget_section,
+        )
+        from analysis.personal_baseline import get_personal_baseline
+
+        hrv_baseline: Optional[float] = None
+        try:
+            baseline = get_personal_baseline()
+            if baseline.hrv_mean is not None:
+                hrv_baseline = baseline.hrv_mean
+        except Exception:
+            pass
+
+        # Fetch CDI tier from store for accurate modifier
+        cdi_tier: Optional[str] = None
+        try:
+            from analysis.cognitive_debt import compute_cdi
+            debt = compute_cdi(date_str)
+            if debt.is_meaningful:
+                cdi_tier = debt.tier
+        except Exception:
+            pass
+
+        budget = compute_cognitive_budget(
+            date_str=date_str,
+            whoop_data=whoop_data,
+            cdi_tier=cdi_tier,
+            hrv_baseline=hrv_baseline,
+        )
+        if not budget.is_meaningful:
+            return None
+        return {
+            "dcb_hours": budget.dcb_hours,
+            "dcb_low": budget.dcb_low,
+            "dcb_high": budget.dcb_high,
+            "tier": budget.tier,
+            "label": budget.label,
+            "narrative": budget.narrative,
+            "guidance": budget.guidance,
+            "line": format_budget_line(budget),
+            "section": format_budget_section(budget),
             "is_meaningful": True,
         }
     except Exception:
@@ -954,6 +1030,21 @@ def format_morning_brief_message(brief: dict) -> str:
         if cdi_line:
             lines.append("")
             lines.append(f"_{cdi_line}_")
+
+    # ── Daily Cognitive Budget (v16.0) ────────────────────────────────────
+    # Concrete quality cognitive hours available today.
+    # Translates WHOOP recovery + sleep + CDI into a single actionable figure:
+    # "~6.0h of quality focus work available."  Positioned after CDI so the
+    # two signals read together: "Here's your debt level — here's your budget."
+    cognitive_budget = brief.get("cognitive_budget")
+    if cognitive_budget and cognitive_budget.get("is_meaningful"):
+        budget_line = cognitive_budget.get("line", "")
+        if budget_line:
+            lines.append("")
+            lines.append(budget_line)
+        budget_guidance = cognitive_budget.get("guidance", "")
+        if budget_guidance:
+            lines.append(f"_{budget_guidance}_")
 
     # ── DPS Trend (v9.0) ──────────────────────────────────────────────────
     # Is the quality of David's cognitive days improving or declining?
