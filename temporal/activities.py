@@ -168,6 +168,37 @@ async def retrain_ml_models(force: bool = False) -> dict:
 
 
 @activity.defn
+async def send_midday_checkin(date_str: str) -> bool:
+    """Send the midday cognitive check-in DM to David.
+
+    Computes morning-so-far signals (CLS, FDI, SDI, meetings) from the partial
+    day JSONL, determines afternoon pace and recommendation, and sends a brief
+    Slack DM.  Runs at 13:00 Budapest via MidDayCheckInWorkflow.
+
+    Returns True if the DM was sent successfully (or not meaningful — graceful skip).
+    """
+    from analysis.midday_checkin import compute_midday_checkin, send_midday_checkin as _send
+    try:
+        checkin = compute_midday_checkin(date_str)
+        if not checkin.is_meaningful:
+            activity.logger.info(
+                f"Midday check-in not meaningful for {date_str} "
+                f"({checkin.active_windows} active morning windows). Skipping."
+            )
+            return True  # Not an error — just a quiet morning
+        ok = _send(date_str)
+        status = "sent" if ok else "failed"
+        activity.logger.info(
+            f"Midday check-in {status} for {date_str} — "
+            f"CLS {checkin.morning_cls:.3f}, pace={checkin.pace_label}"
+        )
+        return ok
+    except Exception as e:
+        activity.logger.error(f"Midday check-in failed: {e}")
+        return False
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

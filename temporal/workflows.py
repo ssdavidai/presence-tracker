@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         run_weekly_intuition,
         run_weekly_summary,
         send_morning_readiness_brief,
+        send_midday_checkin,
         notify_slack_presence,
         generate_daily_dashboard,
         generate_weekly_dashboard,
@@ -139,6 +140,58 @@ class MorningBriefWorkflow:
 
         except Exception as e:
             error_msg = f"[PRESENCE] Morning brief FAILED for {date_str}: {str(e)}"
+            workflow.logger.error(error_msg)
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[error_msg],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            raise
+
+
+@workflow.defn
+class MidDayCheckInWorkflow:
+    """
+    Midday cognitive check-in — brief Slack pulse at 13:00 Budapest.
+
+    Fills the 6-hour gap between the morning brief (07:00) and the nightly
+    digest (23:45).  Ingests partial-day data (00:00–13:00), computes morning
+    load signals (CLS, FDI, SDI, meetings) and an afternoon recommendation,
+    then sends a 4–6 line Slack DM to David.
+
+    The workflow silently skips when fewer than 3 active morning windows exist
+    (e.g. very quiet mornings or days with no JSONL data yet) — this is not
+    treated as an error.
+
+    Schedule: 13:00 Budapest time, daily (Mon–Fri)
+    """
+
+    @workflow.run
+    async def run(self, date_str: str = None) -> str:
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        workflow.logger.info(f"Starting midday check-in for {date_str}")
+
+        try:
+            ok = await workflow.execute_activity(
+                send_midday_checkin,
+                args=[date_str],
+                start_to_close_timeout=DEFAULT_TIMEOUT,
+                retry_policy=RETRY_POLICY,
+            )
+
+            status = "sent" if ok else "skipped"
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[f"[PRESENCE] Midday check-in {status} — {date_str}"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            return f"Midday check-in {status}: {date_str}"
+
+        except Exception as e:
+            error_msg = f"[PRESENCE] Midday check-in FAILED for {date_str}: {str(e)}"
             workflow.logger.error(error_msg)
             await workflow.execute_activity(
                 notify_slack_presence,
