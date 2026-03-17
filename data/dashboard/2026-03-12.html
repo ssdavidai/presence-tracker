@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Presence Report — Thursday, March 12, 2026</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2a2d3e;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #7c3aed;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 24px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  h2 { font-size: 0.85rem; font-weight: 600; color: var(--muted); text-transform: uppercase;
+        letter-spacing: 0.08em; margin-bottom: 12px; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 24px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+  }
+  .card-full { grid-column: 1 / -1; }
+  .recovery-circle {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+  .recovery-badge {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.3rem;
+    font-weight: 700;
+    flex-shrink: 0;
+    border: 3px solid #f87171;
+    color: #f87171;
+  }
+  .recovery-stats { display: flex; flex-direction: column; gap: 4px; }
+  .recovery-stat { display: flex; gap: 8px; }
+  .recovery-stat .lbl { color: var(--muted); min-width: 80px; }
+  .metric-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .metric-label { width: 200px; font-size: 0.82rem; color: var(--muted); flex-shrink: 0; }
+  .bar-track {
+    flex: 1;
+    height: 8px;
+    background: #2a2d3e;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s;
+  }
+  .metric-value { width: 42px; text-align: right; font-size: 0.82rem; font-weight: 600; }
+  .stat-grid {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .stat-item { display: flex; flex-direction: column; gap: 2px; }
+  .stat-val { font-size: 1.1rem; font-weight: 700; }
+  .stat-lbl { font-size: 0.75rem; color: var(--muted); }
+  .insight-box {
+    background: #1e2235;
+    border-left: 3px solid #7c3aed;
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    margin-top: 8px;
+  }
+  .trend-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .badge {
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-red { background: #7f1d1d; color: #fca5a5; }
+  .badge-green { background: #14532d; color: #86efac; }
+  .badge-amber { background: #78350f; color: #fcd34d; }
+  .chart-wrapper { overflow-x: auto; }
+  svg { display: block; }
+  .peak-text { font-size: 0.95rem; }
+  footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 32px; }
+  /* DPS + CDI hero card */
+  .hero-card { margin-bottom: 16px; }
+  .score-grid {
+    display: flex;
+    gap: 40px;
+    flex-wrap: wrap;
+    align-items: center;
+    padding-top: 4px;
+  }
+  .score-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .score-item.score-na {
+    color: var(--muted);
+    font-size: 0.88rem;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  .score-meta { display: flex; flex-direction: column; gap: 3px; }
+  .score-title { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .score-tier { font-size: 1.0rem; font-weight: 700; }
+  .score-desc { font-size: 0.75rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>🧠 Presence Report</h1>
+<p class="subtitle">Thursday, March 12, 2026</p>
+
+<div class="trend-badges"><span class="badge badge-amber">HRV -12% vs baseline</span> <span class="badge badge-amber">Load +399% vs baseline</span></div>
+
+<!-- DPS + CDI hero scores -->
+
+<div class="card hero-card">
+  <h2>🎯 Today's Scores</h2>
+  <div class="score-grid">
+    
+    <div class="score-item">
+      <svg width="90" height="90" style="display:block;flex-shrink:0"><circle cx="45" cy="45" r="40" fill="none" stroke="#2a2d3e" stroke-width="6"/><circle cx="45" cy="45" r="40" fill="none" stroke="#4ade80" stroke-width="6" stroke-dasharray="205.1 46.2" stroke-linecap="round" transform="rotate(-90 45 45)"/><text x="45" y="45" text-anchor="middle" dominant-baseline="central" font-size="18" font-weight="700" fill="#4ade80">82</text></svg>
+      <div class="score-meta">
+        <div class="score-title">Daily Presence Score</div>
+        <div class="score-tier" style="color:#4ade80">Strong</div>
+        <div class="score-desc">Cognitive day quality</div>
+      </div>
+    </div>
+    
+    <div class="score-item">
+      <svg width="90" height="90" style="display:block;flex-shrink:0"><circle cx="45" cy="45" r="40" fill="none" stroke="#2a2d3e" stroke-width="6"/><circle cx="45" cy="45" r="40" fill="none" stroke="#94a3b8" stroke-width="6" stroke-dasharray="125.2 126.2" stroke-linecap="round" transform="rotate(-90 45 45)"/><text x="45" y="45" text-anchor="middle" dominant-baseline="central" font-size="18" font-weight="700" fill="#94a3b8">50</text></svg>
+      <div class="score-meta">
+        <div class="score-title">Cognitive Debt Index</div>
+        <div class="score-tier" style="color:#94a3b8">Warming up</div>
+        <div class="score-desc">Need ≥3 days of data</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Recovery + Activity row -->
+<div class="grid-2">
+  <div class="card">
+    <h2>💚 Recovery</h2>
+    <div class="recovery-circle">
+      <div class="recovery-badge">26%</div>
+      <div class="recovery-stats">
+        <div class='recovery-stat'><span class='lbl'>HRV</span><span>71 ms</span></div>
+        <div class='recovery-stat'><span class='lbl'>Sleep</span><span>8.7h</span></div>
+        <div class='recovery-stat'><span class='lbl'>Sleep perf.</span><span>86%</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📊 Activity</h2>
+    <div class="stat-grid">
+      <div class="stat-item">
+        <span class="stat-val">1</span>
+        <span class="stat-lbl">meetings (60 min)</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-val">76</span>
+        <span class="stat-lbl">messages sent</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-val">58</span>
+        <span class="stat-lbl">active windows</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-val">727</span>
+        <span class="stat-lbl">messages received</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CLS Timeline -->
+<div class="card">
+  <h2>⏱ Cognitive Load Timeline (CLS)</h2>
+  <div class="chart-wrapper">
+    <svg viewBox="0 0 800 160" width="800" height="160" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="clsGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f87171" stop-opacity="0.6"/>
+      <stop offset="60%" stop-color="#facc15" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#4ade80" stop-opacity="0.05"/>
+    </linearGradient>
+  </defs>
+  <rect x="261.1" y="10" width="473.7" height="120" fill="#ffffff08" rx="2"/>
+  <line x1="36" y1="130.0" x2="790" y2="130.0" stroke="#333" stroke-width="0.5" stroke-dasharray="2,4"/><text x="34" y="134.0" text-anchor="end" font-size="9" fill="#888">0%</text><line x1="36" y1="100.0" x2="790" y2="100.0" stroke="#333" stroke-width="0.5" stroke-dasharray="2,4"/><text x="34" y="104.0" text-anchor="end" font-size="9" fill="#888">25%</text><line x1="36" y1="70.0" x2="790" y2="70.0" stroke="#333" stroke-width="0.5" stroke-dasharray="2,4"/><text x="34" y="74.0" text-anchor="end" font-size="9" fill="#888">50%</text><line x1="36" y1="40.0" x2="790" y2="40.0" stroke="#333" stroke-width="0.5" stroke-dasharray="2,4"/><text x="34" y="44.0" text-anchor="end" font-size="9" fill="#888">75%</text><line x1="36" y1="10.0" x2="790" y2="10.0" stroke="#333" stroke-width="0.5" stroke-dasharray="2,4"/><text x="34" y="14.0" text-anchor="end" font-size="9" fill="#888">100%</text>
+  <text x="40.0" y="148.0" text-anchor="middle" font-size="9" fill="#888">00h</text><text x="103.2" y="148.0" text-anchor="middle" font-size="9" fill="#888">02h</text><text x="166.3" y="148.0" text-anchor="middle" font-size="9" fill="#888">04h</text><text x="229.5" y="148.0" text-anchor="middle" font-size="9" fill="#888">06h</text><text x="292.6" y="148.0" text-anchor="middle" font-size="9" fill="#888">08h</text><text x="355.8" y="148.0" text-anchor="middle" font-size="9" fill="#888">10h</text><text x="418.9" y="148.0" text-anchor="middle" font-size="9" fill="#888">12h</text><text x="482.1" y="148.0" text-anchor="middle" font-size="9" fill="#888">14h</text><text x="545.3" y="148.0" text-anchor="middle" font-size="9" fill="#888">16h</text><text x="608.4" y="148.0" text-anchor="middle" font-size="9" fill="#888">18h</text><text x="671.6" y="148.0" text-anchor="middle" font-size="9" fill="#888">20h</text><text x="734.7" y="148.0" text-anchor="middle" font-size="9" fill="#888">22h</text><text x="790.0" y="148.0" text-anchor="middle" font-size="9" fill="#888">24h</text>
+  <polygon points="40.0,117.2 47.9,117.2 55.8,116.2 63.7,116.2 71.6,110.2 79.5,117.2 87.4,93.2 95.3,115.2 103.2,113.2 111.1,115.2 118.9,114.2 126.8,117.2 134.7,114.2 142.6,116.2 150.5,101.2 158.4,102.2 166.3,116.2 174.2,117.2 182.1,116.2 190.0,117.2 197.9,117.2 205.8,117.2 213.7,117.2 221.6,117.2 229.5,115.2 237.4,117.2 245.3,114.2 253.2,96.2 261.1,113.2 268.9,113.2 276.8,107.2 284.7,117.2 292.6,107.2 300.5,115.2 308.4,116.2 316.3,113.2 324.2,68.8 332.1,63.1 340.0,61.6 347.9,53.8 355.8,97.8 363.7,115.2 371.6,112.8 379.5,110.2 387.4,110.5 395.3,105.4 403.2,110.8 411.1,108.6 418.9,103.3 426.8,100.4 434.7,88.6 442.6,106.1 450.5,106.0 458.4,92.8 466.3,108.5 474.2,87.4 482.1,104.0 490.0,87.1 497.9,88.0 505.8,95.1 513.7,115.2 521.6,91.2 529.5,99.2 537.4,98.1 545.3,105.5 553.2,116.2 561.1,109.3 568.9,110.0 576.8,115.2 584.7,109.6 592.6,108.2 600.5,105.5 608.4,104.5 616.3,106.6 624.2,95.5 632.1,104.2 640.0,116.2 647.9,99.2 655.8,93.2 663.7,104.2 671.6,115.2 679.5,117.2 687.4,105.2 695.3,116.2 703.2,111.2 711.1,114.2 718.9,110.2 726.8,116.2 734.7,109.2 742.6,117.2 750.5,117.2 758.4,117.2 766.3,117.2 774.2,117.2 782.1,117.2 790.0,117.2 790.0,130.0 40.0,130.0" fill="url(#clsGrad)" stroke="none"/>
+  <polyline points="40.0,117.2 47.9,117.2 55.8,116.2 63.7,116.2 71.6,110.2 79.5,117.2 87.4,93.2 95.3,115.2 103.2,113.2 111.1,115.2 118.9,114.2 126.8,117.2 134.7,114.2 142.6,116.2 150.5,101.2 158.4,102.2 166.3,116.2 174.2,117.2 182.1,116.2 190.0,117.2 197.9,117.2 205.8,117.2 213.7,117.2 221.6,117.2 229.5,115.2 237.4,117.2 245.3,114.2 253.2,96.2 261.1,113.2 268.9,113.2 276.8,107.2 284.7,117.2 292.6,107.2 300.5,115.2 308.4,116.2 316.3,113.2 324.2,68.8 332.1,63.1 340.0,61.6 347.9,53.8 355.8,97.8 363.7,115.2 371.6,112.8 379.5,110.2 387.4,110.5 395.3,105.4 403.2,110.8 411.1,108.6 418.9,103.3 426.8,100.4 434.7,88.6 442.6,106.1 450.5,106.0 458.4,92.8 466.3,108.5 474.2,87.4 482.1,104.0 490.0,87.1 497.9,88.0 505.8,95.1 513.7,115.2 521.6,91.2 529.5,99.2 537.4,98.1 545.3,105.5 553.2,116.2 561.1,109.3 568.9,110.0 576.8,115.2 584.7,109.6 592.6,108.2 600.5,105.5 608.4,104.5 616.3,106.6 624.2,95.5 632.1,104.2 640.0,116.2 647.9,99.2 655.8,93.2 663.7,104.2 671.6,115.2 679.5,117.2 687.4,105.2 695.3,116.2 703.2,111.2 711.1,114.2 718.9,110.2 726.8,116.2 734.7,109.2 742.6,117.2 750.5,117.2 758.4,117.2 766.3,117.2 774.2,117.2 782.1,117.2 790.0,117.2" fill="none" stroke="#f87171" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>
+  </div>
+  <p style="font-size:0.75rem;color:var(--muted);margin-top:6px;">
+    Shaded area = working hours (7am–10pm). Area under curve = cumulative load.
+  </p>
+</div>
+
+<!-- Hourly Heatmap -->
+<div class="card">
+  <h2>🌡 Hourly Intensity (7am–10pm)</h2>
+  <div class="chart-wrapper">
+    <svg viewBox="0 0 800 60" width="800" height="60" xmlns="http://www.w3.org/2000/svg">
+  <rect x="40.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.32"/><title>07:00 — CLS 14%</title><text x="65.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">7h</text><rect x="90.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.31"/><title>08:00 — CLS 14%</title><text x="115.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">8h</text><rect x="140.0" y="2" width="49.0" height="38.0" rx="3" fill="#fb923c" opacity="0.65"/><title>09:00 — CLS 57%</title><text x="165.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">9h</text><rect x="190.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.34"/><title>10:00 — CLS 18%</title><text x="215.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">10h</text><rect x="240.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.34"/><title>11:00 — CLS 18%</title><text x="265.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">11h</text><rect x="290.0" y="2" width="49.0" height="38.0" rx="3" fill="#facc15" opacity="0.40"/><title>12:00 — CLS 25%</title><text x="315.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">12h</text><rect x="340.0" y="2" width="49.0" height="38.0" rx="3" fill="#facc15" opacity="0.41"/><title>13:00 — CLS 26%</title><text x="365.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">13h</text><rect x="390.0" y="2" width="49.0" height="38.0" rx="3" fill="#facc15" opacity="0.44"/><title>14:00 — CLS 30%</title><text x="415.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">14h</text><rect x="440.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.39"/><title>15:00 — CLS 24%</title><text x="465.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">15h</text><rect x="490.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.33"/><title>16:00 — CLS 16%</title><text x="515.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">16h</text><rect x="540.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.34"/><title>17:00 — CLS 17%</title><text x="565.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">17h</text><rect x="590.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.38"/><title>18:00 — CLS 23%</title><text x="615.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">18h</text><rect x="640.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.38"/><title>19:00 — CLS 22%</title><text x="665.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">19h</text><rect x="690.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.31"/><title>20:00 — CLS 14%</title><text x="715.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">20h</text><rect x="740.0" y="2" width="49.0" height="38.0" rx="3" fill="#4ade80" opacity="0.31"/><title>21:00 — CLS 14%</title><text x="765.0" y="54.0" text-anchor="middle" font-size="9" fill="#888">21h</text>
+</svg>
+  </div>
+</div>
+
+<!-- Metric Bars -->
+<div class="card">
+  <h2>📐 Metric Breakdown</h2>
+  
+<div class="metric-row">
+  <span class="metric-label">Cognitive Load (CLS)</span>
+  <div class="bar-track">
+    <div class="bar-fill" style="width:22.2%;background:#4ade80"></div>
+  </div>
+  <span class="metric-value">22%</span>
+</div>
+<div class="metric-row">
+  <span class="metric-label">Focus Depth (FDI)</span>
+  <div class="bar-track">
+    <div class="bar-fill" style="width:79.7%;background:#60a5fa"></div>
+  </div>
+  <span class="metric-value">80%</span>
+</div>
+<div class="metric-row">
+  <span class="metric-label">Social Drain (SDI)</span>
+  <div class="bar-track">
+    <div class="bar-fill" style="width:6.3%;background:#a78bfa"></div>
+  </div>
+  <span class="metric-value">6%</span>
+</div>
+<div class="metric-row">
+  <span class="metric-label">Context Switch Cost (CSC)</span>
+  <div class="bar-track">
+    <div class="bar-fill" style="width:10.5%;background:#fb923c"></div>
+  </div>
+  <span class="metric-value">10%</span>
+</div>
+<div class="metric-row">
+  <span class="metric-label">Recovery Alignment (RAS)</span>
+  <div class="bar-track">
+    <div class="bar-fill" style="width:82.4%;background:#4ade80"></div>
+  </div>
+  <span class="metric-value">82%</span>
+</div>
+</div>
+
+
+<div class="card">
+  <h2>💻 Computer Activity (RescueTime)</h2>
+  <div class="stat-grid"><div class="stat-item"><span class="stat-val">0.1h</span><span class="stat-lbl">on computer</span></div><div class="stat-item"><span class="stat-val">0.1h (95%)</span><span class="stat-lbl">focused</span></div><div class="stat-item"><span class="stat-val">0.0h</span><span class="stat-lbl">distracted</span></div><div class="stat-item"><span class="stat-val">127.0.0.1:18789</span><span class="stat-lbl">top app</span></div></div>
+</div>
+
+
+<div class="card">
+  <h2>🎙️ Conversation (Omi)</h2>
+  <div class="stat-grid">
+    <div class="stat-item"><span class="stat-val">510 min</span><span class="stat-lbl">conversation</span></div>
+    <div class="stat-item"><span class="stat-val">18,562</span><span class="stat-lbl">words spoken</span></div>
+    <div class="stat-item"><span class="stat-val">34</span><span class="stat-lbl">active windows</span></div>
+  </div>
+</div>
+
+
+<div class="card">
+  <h2>⚡ Peak Load Window</h2>
+  <p class="peak-text">
+    <strong>09:45</strong> — CLS 64%
+    · Henry and David 
+  </p>
+</div>
+
+<!-- Flow State + Load Volatility side-by-side when both present -->
+<div class="grid-2">
+<div class="card">
+  <h2>🌊 Flow State</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <div>
+      <div style="font-size:1.6rem;font-weight:700;color:#4ade80">585 min</div>
+      <div style="font-size:0.78rem;color:var(--muted)">flow time · 9 sessions</div>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:1.0rem;font-weight:600;color:#4ade80">Deep Flow</div>
+      <div style="font-size:0.78rem;color:var(--muted)">Score: 1.00</div>
+      <div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:100.0%;background:#4ade80"></div></div>
+    </div>
+  </div>
+  <div style="margin-top:10px;font-size:0.82rem;color:var(--muted)">Best session: <strong style="color:var(--text)">10:00–12:30</strong> · 150 min · FDI 84%</div>
+  <div style="margin-top:8px;font-size:0.78rem;color:var(--muted)">Exceptional flow day — 9h 45m in sustained flow (peak 10:00–12:30, 2h 30m). This is your cognitive peak performance zone.</div>
+</div>
+<div class="card">
+  <h2>📈 Load Volatility</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <div>
+      <div style="font-size:1.6rem;font-weight:700;color:#60a5fa">0.67</div>
+      <div style="font-size:0.78rem;color:var(--muted)">LVI · 0=volatile 1=smooth</div>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:1.0rem;font-weight:600;color:#60a5fa">Steady</div>
+      <div style="font-size:0.78rem;color:var(--muted)">
+        Std: 0.115 · Range: 0.520 · Windows: 58
+      </div>
+      <div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:67.0%;background:#60a5fa"></div></div>
+    </div>
+  </div>
+  <div style="margin-top:4px;font-size:0.78rem;color:var(--muted)">Moderate load variation today (52% swing) — some peaks and troughs but broadly predictable across 58 active windows.</div>
+</div></div>
+
+<!-- Insight -->
+<div class="card">
+  <h2>💡 Insight</h2>
+  <div class="insight-box">Good self-management: recovery was low (26%) and you kept load light. HRV should bounce back tomorrow.</div>
+</div>
+
+<footer>
+  Presence Tracker · Generated 2026-03-17 07:07 ·
+  Data sources: whoop, calendar, slack
+</footer>
+
+</body>
+</html>

@@ -967,45 +967,94 @@ def format_weekly_message(summary: dict) -> str:
     except Exception:
         pass  # sleep correlator is non-critical — never block the weekly summary
 
-    # ── Personal Records milestones (v2.3) ────────────────────────────────────
-    # Surfaces any new all-time bests or meaningful streaks set during the
-    # past 7 days.  Checks each day in the week window for new records so
-    # that a mid-week personal best is not missed just because it wasn't
-    # set on the last day of the summary period.
+    # ── Personal Records milestones (v2.3, fixed v2.8) ───────────────────────
+    # Surfaces new all-time bests and meaningful streaks set during the past
+    # 7 days.  Shows each achievement once — no progressive streak duplicates.
+    #
+    # Fix (v2.8): the previous approach recomputed records day-by-day, which
+    # caused streak lines to appear multiple times with growing counts
+    # (e.g. "2 days", "3 days", "4 days" for the same streak). The new
+    # approach computes records once (as-of end_date) and checks all-time
+    # bests against the week window — each metric appears at most once.
     # Degrades silently — never blocks the weekly summary.
     try:
         from analysis.personal_records import (
             compute_personal_records,
             check_today_records,
-            format_records_line,
         )
-        # Use end_date as the reference so all-time bests include the full week
+
+        # Compute records once, as-of end_date (includes the full week)
         all_records = compute_personal_records(as_of_date_str=end_date)
         if all_records.is_meaningful():
             week_record_lines = []
-            # Check every day in the week window (oldest → newest)
+
+            # Compute the window of dates in this week
             try:
                 end_dt_rec = datetime.strptime(end_date, "%Y-%m-%d")
-                week_days_to_check = [
+                week_dates_set = {
                     (end_dt_rec - timedelta(days=i)).strftime("%Y-%m-%d")
-                    for i in range(6, -1, -1)
-                ]
+                    for i in range(7)
+                }
             except Exception:
-                week_days_to_check = []
+                week_dates_set = set()
 
-            seen_bests: set = set()  # avoid duplicate lines if same record hit twice
-            for day_str in week_days_to_check:
-                try:
-                    # Compute records as-of this day so the check is accurate
-                    day_records = compute_personal_records(as_of_date_str=day_str)
-                    today_rec = check_today_records(day_str, day_records)
-                    if today_rec.has_records:
-                        rec_line = format_records_line(today_rec)
-                        if rec_line and rec_line not in seen_bests:
-                            week_record_lines.append(rec_line)
-                            seen_bests.add(rec_line)
-                except Exception:
+            # ── All-time bests set this week ──────────────────────────────
+            # Map: metric name → (record holder date, value label)
+            best_checks = [
+                ("FDI", all_records.best_fdi_day),
+                ("CLS", all_records.best_cls_day),
+                ("RAS", all_records.best_ras_day),
+                ("DPS", all_records.best_dps_day),
+                ("Recovery", all_records.best_recovery_day),
+                ("HRV", all_records.best_hrv_day),
+            ]
+            new_bests_this_week = [
+                name
+                for name, rec in best_checks
+                if rec and rec.date_str in week_dates_set
+            ]
+            if new_bests_this_week:
+                week_record_lines.append(
+                    f"🏆 *New personal best:* {' · '.join(new_bests_this_week)}"
+                )
+
+            # ── Active streaks — show each streak exactly once ────────────
+            # Use the final (end_date) record state so we show the peak
+            # streak length reached by end of the week, not each increment.
+            streak_defs = [
+                ("Low load",        all_records.low_load_streak,         "low_load"),
+                ("Deep focus",      all_records.deep_focus_streak,       "deep_focus"),
+                ("Recovery aligned",all_records.recovery_aligned_streak, "recovery_aligned"),
+                ("Green recovery",  all_records.green_recovery_streak,   "green_recovery"),
+            ]
+            for streak_name, streak_obj, _ in streak_defs:
+                if streak_obj is None:
                     continue
+                current = streak_obj.current_streak
+                longest = streak_obj.longest_streak
+                streak_end = streak_obj.longest_streak_end or ""
+
+                # Only surface streaks that were active at end_date and ≥ 2
+                if current < 2:
+                    continue
+
+                # Did this streak reach a new all-time length during the week?
+                is_new_record = (
+                    current == longest
+                    and streak_end in week_dates_set
+                )
+                if is_new_record:
+                    week_record_lines.append(
+                        f"🔥 *{streak_name} streak:* {current} days (new record!)"
+                    )
+                elif current >= 3:
+                    week_record_lines.append(
+                        f"🔥 *{streak_name} streak:* {current} days running"
+                    )
+                else:
+                    week_record_lines.append(
+                        f"✅ *{streak_name} streak:* {current} days"
+                    )
 
             if week_record_lines:
                 lines.append("")
