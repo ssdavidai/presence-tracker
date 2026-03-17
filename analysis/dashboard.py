@@ -1,5 +1,5 @@
 """
-Presence Tracker — Daily HTML Dashboard (v11)
+Presence Tracker — Daily HTML Dashboard (v12)
 
 Generates a self-contained HTML file for a given day:
   data/dashboard/YYYY-MM-DD.html
@@ -9,6 +9,27 @@ Charts (pure SVG — no CDN, no external dependencies):
   - Metric bars: FDI, SDI, CSC, RAS as horizontal progress bars
   - Hourly heatmap: intensity grid over working hours
   - WHOOP recovery panel: recovery %, HRV, sleep
+
+v12 — Flow State + Load Volatility (LVI) cards:
+  Two new analytical sections surfaced directly on the dashboard:
+
+  Flow State (from analysis/flow_detector.py):
+    Shows today's deep-work sessions detected from the FDI/CLS/CSC signals.
+    Displays total flow minutes, best session time block, and the flow label
+    (deep_flow / in_zone / brief / none). Lets David see at a glance whether
+    he achieved any sustained cognitive immersion today, and when it happened.
+
+  Load Volatility Index / LVI (from analysis/load_volatility.py):
+    Shows whether today's cognitive load was smooth and predictable, or
+    volatile and spiky. An LVI of 1.0 = perfectly smooth; 0.0 = chaotic
+    whiplash between low and high load. Includes a visual LVI bar, the
+    label (smooth / steady / variable / volatile), and the key stats
+    (CLS std, CLS range). A day with LVI = 0.8 is more sustainable than
+    a day with the same *average* CLS but LVI = 0.3.
+
+  These two modules were shipped in v32 and v35 respectively but were not
+  previously wired into the HTML dashboard. This release closes that gap,
+  giving David a fuller picture in the daily report.
 
 v11 — DPS + CDI hero section:
   The dashboard now leads with the two most important composite scores:
@@ -549,6 +570,115 @@ def generate_dashboard(date_str: str, output_path: Optional[Path] = None) -> Pat
   </div>
 </div>"""
 
+    # ── Flow State card ───────────────────────────────────────────────────────
+    flow_html = ""
+    try:
+        from analysis.flow_detector import detect_flow_states, FlowStateResult
+
+        flow_result: FlowStateResult = detect_flow_states(windows)
+        if flow_result.is_meaningful:
+            # Colour by flow label
+            _flow_colours = {
+                "deep_flow": "#4ade80",   # green
+                "in_zone":   "#60a5fa",   # blue
+                "brief":     "#facc15",   # yellow
+                "none":      "#94a3b8",   # grey
+            }
+            flow_colour = _flow_colours.get(flow_result.flow_label, "#94a3b8")
+            flow_label_display = {
+                "deep_flow": "Deep Flow",
+                "in_zone":   "In the Zone",
+                "brief":     "Brief Focus",
+                "none":      "No Flow",
+            }.get(flow_result.flow_label, flow_result.flow_label.replace("_", " ").title())
+
+            # LVI score bar (0–1 → 0–100%)
+            flow_pct = flow_result.flow_score * 100
+            flow_bar = (
+                f'<div class="bar-track" style="margin-top:8px">'
+                f'<div class="bar-fill" style="width:{flow_pct:.1f}%;background:{flow_colour}"></div>'
+                f'</div>'
+            )
+
+            # Best session block
+            peak_session_html = ""
+            if flow_result.peak_session:
+                ps = flow_result.peak_session
+                peak_session_html = (
+                    f'<div style="margin-top:10px;font-size:0.82rem;color:var(--muted)">'
+                    f'Best session: <strong style="color:var(--text)">'
+                    f'{ps.start_time}–{ps.end_time}</strong>'
+                    f' · {ps.duration_minutes} min'
+                    f' · FDI {ps.avg_fdi:.0%}</div>'
+                )
+
+            sessions_count = len(flow_result.flow_sessions)
+            sessions_label = f"{sessions_count} session{'s' if sessions_count != 1 else ''}" if sessions_count else "no sessions"
+
+            flow_html = f"""
+<div class="card">
+  <h2>🌊 Flow State</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <div>
+      <div style="font-size:1.6rem;font-weight:700;color:{flow_colour}">{flow_result.total_flow_minutes} min</div>
+      <div style="font-size:0.78rem;color:var(--muted)">flow time · {sessions_label}</div>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:1.0rem;font-weight:600;color:{flow_colour}">{flow_label_display}</div>
+      <div style="font-size:0.78rem;color:var(--muted)">Score: {flow_result.flow_score:.2f}</div>
+      {flow_bar}
+    </div>
+  </div>
+  {peak_session_html}
+  <div style="margin-top:8px;font-size:0.78rem;color:var(--muted)">{flow_result.insight}</div>
+</div>"""
+    except Exception:
+        pass
+
+    # ── Load Volatility (LVI) card ────────────────────────────────────────────
+    lvi_html = ""
+    try:
+        from analysis.load_volatility import compute_load_volatility, LoadVolatility
+
+        lvi_result: LoadVolatility = compute_load_volatility(windows)
+        if lvi_result.is_meaningful:
+            _lvi_colours = {
+                "smooth":   "#4ade80",   # green
+                "steady":   "#60a5fa",   # blue
+                "variable": "#facc15",   # yellow
+                "volatile": "#f87171",   # red
+            }
+            lvi_colour = _lvi_colours.get(lvi_result.label, "#94a3b8")
+            lvi_label_display = lvi_result.label.title()
+            lvi_pct = lvi_result.lvi * 100
+
+            lvi_bar = (
+                f'<div class="bar-track" style="margin-top:8px">'
+                f'<div class="bar-fill" style="width:{lvi_pct:.1f}%;background:{lvi_colour}"></div>'
+                f'</div>'
+            )
+
+            lvi_html = f"""
+<div class="card">
+  <h2>📈 Load Volatility</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <div>
+      <div style="font-size:1.6rem;font-weight:700;color:{lvi_colour}">{lvi_result.lvi:.2f}</div>
+      <div style="font-size:0.78rem;color:var(--muted)">LVI · 0=volatile 1=smooth</div>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:1.0rem;font-weight:600;color:{lvi_colour}">{lvi_label_display}</div>
+      <div style="font-size:0.78rem;color:var(--muted)">
+        Std: {lvi_result.cls_std:.3f} · Range: {lvi_result.cls_range:.3f} · Windows: {lvi_result.windows_used}
+      </div>
+      {lvi_bar}
+    </div>
+  </div>
+  <div style="margin-top:4px;font-size:0.78rem;color:var(--muted)">{lvi_result.insight}</div>
+</div>"""
+    except Exception:
+        pass
+
     # ── Full HTML template ──
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -771,6 +901,9 @@ def generate_dashboard(date_str: str, output_path: Optional[Path] = None) -> Pat
 {omi_html}
 
 {peak_html}
+
+<!-- Flow State + Load Volatility side-by-side when both present -->
+{f'<div class="grid-2">{flow_html}{lvi_html}</div>' if flow_html and lvi_html else flow_html + lvi_html}
 
 <!-- Insight -->
 <div class="card">

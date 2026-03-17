@@ -300,6 +300,42 @@
   </p>
 </div>
 
+<!-- Flow State + Load Volatility side-by-side when both present -->
+<div class="grid-2">
+<div class="card">
+  <h2>🌊 Flow State</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <div>
+      <div style="font-size:1.6rem;font-weight:700;color:#94a3b8">0 min</div>
+      <div style="font-size:0.78rem;color:var(--muted)">flow time · no sessions</div>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:1.0rem;font-weight:600;color:#94a3b8">No Flow</div>
+      <div style="font-size:0.78rem;color:var(--muted)">Score: 0.00</div>
+      <div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:0.0%;background:#94a3b8"></div></div>
+    </div>
+  </div>
+  
+  <div style="margin-top:8px;font-size:0.78rem;color:var(--muted)">No sustained flow sessions detected today — load, focus, or fragmentation conditions didn't align.</div>
+</div>
+<div class="card">
+  <h2>📈 Load Volatility</h2>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <div>
+      <div style="font-size:1.6rem;font-weight:700;color:#4ade80">0.95</div>
+      <div style="font-size:0.78rem;color:var(--muted)">LVI · 0=volatile 1=smooth</div>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:1.0rem;font-weight:600;color:#4ade80">Smooth</div>
+      <div style="font-size:0.78rem;color:var(--muted)">
+        Std: 0.019 · Range: 0.075 · Windows: 19
+      </div>
+      <div class="bar-track" style="margin-top:8px"><div class="bar-fill" style="width:94.7%;background:#4ade80"></div></div>
+    </div>
+  </div>
+  <div style="margin-top:4px;font-size:0.78rem;color:var(--muted)">Load was smooth and light all day — an easy, consistent 19-window day.</div>
+</div></div>
+
 <!-- Insight -->
 <div class="card">
   <h2>💡 Insight</h2>
@@ -307,7 +343,7 @@
 </div>
 
 <footer>
-  Presence Tracker · Generated 2026-03-16 17:47 ·
+  Presence Tracker · Generated 2026-03-17 03:59 ·
   Data sources: whoop, calendar, slack
 </footer>
 

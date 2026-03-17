@@ -1,5 +1,5 @@
 """
-Tests for analysis/dashboard.py — Daily HTML Dashboard (v11)
+Tests for analysis/dashboard.py — Daily HTML Dashboard (v12)
 
 Tests cover:
   - generate_dashboard() produces a valid HTML file
@@ -9,6 +9,8 @@ Tests cover:
   - CLI behaviour for missing data
   - Output is self-contained (no external CDN references)
   - DPS + CDI hero section (v11): score rings, tier labels, graceful fallback
+  - Flow State card (v12): section header present, graceful fallback on error
+  - Load Volatility (LVI) card (v12): section header present, graceful fallback on error
 """
 
 import json
@@ -632,3 +634,109 @@ class TestTrendBadges:
             ):
                 path = generate_dashboard("2026-03-13", output_path=out)
             assert path.exists()
+
+
+# ─── Flow State card (v12) ────────────────────────────────────────────────────
+
+class TestFlowStateCard:
+    """Verify the Flow State section in the daily HTML dashboard (v12)."""
+
+    def _run_generate(self) -> str:
+        windows = _make_day()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "test.html"
+            with (
+                patch("engine.store.read_day", return_value=windows),
+                patch("engine.store.get_recent_summaries", return_value=[]),
+            ):
+                path = generate_dashboard("2026-03-13", output_path=out)
+                return path.read_text()
+
+    def test_flow_state_section_present(self):
+        html = self._run_generate()
+        assert "Flow State" in html
+
+    def test_flow_state_shows_flow_time_label(self):
+        html = self._run_generate()
+        # The template renders "min" for total flow minutes
+        assert " min" in html
+
+    def test_flow_state_fallback_on_import_error(self):
+        """Dashboard renders without crashing if flow_detector raises."""
+        windows = _make_day()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "test.html"
+            with (
+                patch("engine.store.read_day", return_value=windows),
+                patch("engine.store.get_recent_summaries", return_value=[]),
+                patch(
+                    "analysis.flow_detector.detect_flow_states",
+                    side_effect=Exception("mock flow error"),
+                ),
+            ):
+                path = generate_dashboard("2026-03-13", output_path=out)
+                html = path.read_text()
+        # Dashboard must still render valid HTML even with flow failure
+        assert "<!DOCTYPE html>" in html
+
+    def test_flow_state_section_after_metric_bars(self):
+        """Flow State should appear after the Metric Breakdown section."""
+        html = self._run_generate()
+        metric_pos = html.find("Metric Breakdown")
+        flow_pos = html.find("Flow State")
+        # If flow section is present, it should come after metric bars
+        if flow_pos != -1 and metric_pos != -1:
+            assert flow_pos > metric_pos
+
+
+# ─── Load Volatility (LVI) card (v12) ────────────────────────────────────────
+
+class TestLoadVolatilityCard:
+    """Verify the Load Volatility section in the daily HTML dashboard (v12)."""
+
+    def _run_generate(self) -> str:
+        windows = _make_day()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "test.html"
+            with (
+                patch("engine.store.read_day", return_value=windows),
+                patch("engine.store.get_recent_summaries", return_value=[]),
+            ):
+                path = generate_dashboard("2026-03-13", output_path=out)
+                return path.read_text()
+
+    def test_load_volatility_section_present(self):
+        html = self._run_generate()
+        assert "Load Volatility" in html
+
+    def test_load_volatility_shows_lvi_label(self):
+        html = self._run_generate()
+        # The LVI label descriptions should appear in the tooltip / insight line
+        assert "LVI" in html or "volatile" in html.lower() or "smooth" in html.lower()
+
+    def test_load_volatility_fallback_on_import_error(self):
+        """Dashboard renders without crashing if load_volatility raises."""
+        windows = _make_day()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "test.html"
+            with (
+                patch("engine.store.read_day", return_value=windows),
+                patch("engine.store.get_recent_summaries", return_value=[]),
+                patch(
+                    "analysis.load_volatility.compute_load_volatility",
+                    side_effect=Exception("mock lvi error"),
+                ),
+            ):
+                path = generate_dashboard("2026-03-13", output_path=out)
+                html = path.read_text()
+        assert "<!DOCTYPE html>" in html
+
+    def test_flow_and_lvi_side_by_side_when_both_present(self):
+        """When both Flow State and LVI cards are present, they share a grid-2 container."""
+        html = self._run_generate()
+        # If both sections appear and data is sufficient, expect them in a grid
+        flow_present = "Flow State" in html
+        lvi_present = "Load Volatility" in html
+        if flow_present and lvi_present:
+            # grid-2 wrapper contains both
+            assert "grid-2" in html
