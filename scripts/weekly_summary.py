@@ -1089,6 +1089,24 @@ def format_weekly_message(summary: dict) -> str:
     except Exception:
         pass  # BRI is non-critical — never block the weekly summary
 
+    # ── Actionable Insights (v42) ─────────────────────────────────────────
+    # Surfaces the top 3 evidence-backed, data-driven behavioural recommendations
+    # derived from the past 14 days of JSONL history.  Deterministic — no LLM.
+    # Only included when at least one insight fires (is_meaningful=True).
+    try:
+        from analysis.actionable_insights import (
+            compute_actionable_insights,
+            format_insights_section,
+        )
+        ai = compute_actionable_insights(as_of_date_str=end_date, days=14)
+        if ai.is_meaningful:
+            insights_section = format_insights_section(ai)
+            if insights_section.strip():
+                lines.append("")
+                lines.append(insights_section.strip())
+    except Exception:
+        pass  # Actionable insights is non-critical — never block the weekly summary
+
     lines.append("")
     lines.append("_Presence Tracker · weekly summary_")
 

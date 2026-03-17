@@ -699,6 +699,12 @@ def compute_morning_brief(
         # Only shown in the morning brief at caution or above (tier ≥ 40).
         # Returns None when < 14 days of data or BRI is healthy/watch.
         "burnout_risk": _compute_burnout_risk_for_brief(today_date),
+        # v42: Actionable Insights — top data-backed behavioural recommendation.
+        # Deterministic (no LLM): surfaces the single highest-impact change David
+        # could make, backed by his personal JSONL history.
+        # Shown in the morning brief as a compact one-liner.
+        # Returns None when < MIN_DAYS data or no detectors fire.
+        "actionable_insights": _compute_actionable_insights_for_brief(today_date),
     }
 
 
@@ -1216,6 +1222,33 @@ def _compute_burnout_risk_for_brief(date_str: str) -> Optional[dict]:
         return None
 
 
+def _compute_actionable_insights_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute top actionable insight for the morning brief (v42).
+
+    Returns only the single highest-impact insight as a compact one-liner.
+    Never blocks the brief — returns None on any error or insufficient data.
+    """
+    try:
+        from analysis.actionable_insights import (
+            compute_actionable_insights,
+            format_insights_brief,
+        )
+        ai = compute_actionable_insights(as_of_date_str=date_str, days=14)
+        if not ai.is_meaningful or not ai.insights:
+            return None
+        top = ai.insights[0]
+        line = format_insights_brief(ai)
+        return {
+            "is_meaningful": True,
+            "line": line,
+            "title": top.title,
+            "impact_label": top.impact_label,
+        }
+    except Exception:
+        return None
+
+
 def _format_dps_trend_line(trend: dict, recent_scores: list) -> str:
     """
     Format a compact DPS trend line for the morning brief.
@@ -1574,6 +1607,16 @@ def format_morning_brief_message(brief: dict) -> str:
             lines.append(bri_line)
             if advice:
                 lines.append(f"_{advice}_")
+
+    # ── Actionable Insights (v42) — top data-backed recommendation ───────
+    # Deterministic top-1 insight derived from 14 days of personal history.
+    # Surfaces only the single highest-impact recommendation as a brief line.
+    actionable_insights = brief.get("actionable_insights")
+    if actionable_insights and actionable_insights.get("is_meaningful"):
+        insight_line = actionable_insights.get("line", "")
+        if insight_line:
+            lines.append("")
+            lines.append(insight_line)
 
     return "\n".join(lines)
 
