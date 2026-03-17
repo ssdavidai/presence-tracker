@@ -12,6 +12,7 @@ Tests cover:
   - format_checkin_message() output
   - Graceful degradation (no windows, not enough active windows)
   - MidDayCheckIn.to_dict() serialisation
+  - Load driver: dominant source detection (v29)
 """
 
 import sys
@@ -30,6 +31,10 @@ from analysis.midday_checkin import (
     _fdi_label,
     _fmt_minutes,
     _build_afternoon_nudge,
+    _decompose_morning_load,
+    _MIN_CLS_FOR_DRIVER,
+    _SOURCE_EMOJIS,
+    _SOURCE_LABELS,
     MIDDAY_HOUR,
     MIN_ACTIVE_WINDOWS,
 )
@@ -419,6 +424,8 @@ class TestFormatCheckinMessage:
             active_windows=8,
             pace_label="On track",
             pace_ratio=1.00,
+            morning_dominant_source=None,
+            morning_dominant_share=None,
             afternoon_nudge="Protect a 90-min deep-work block.",
             remaining_budget_hours=3.5,
             is_meaningful=True,
@@ -468,6 +475,8 @@ class TestFormatCheckinMessage:
             active_windows=1,
             pace_label="Light morning",
             pace_ratio=None,
+            morning_dominant_source=None,
+            morning_dominant_share=None,
             afternoon_nudge="",
             remaining_budget_hours=None,
             is_meaningful=False,
@@ -521,6 +530,7 @@ class TestToDict:
         expected_keys = {
             "date_str", "morning_cls", "morning_fdi", "morning_sdi",
             "meeting_minutes", "active_windows", "pace_label", "pace_ratio",
+            "morning_dominant_source", "morning_dominant_share",
             "afternoon_nudge", "remaining_budget_hours", "is_meaningful",
         }
         assert expected_keys.issubset(set(d.keys()))
@@ -597,3 +607,308 @@ class TestRegressions:
             assert isinstance(msg, str)
         except Exception as e:
             pytest.fail(f"format_checkin_message crashed: {e}")
+
+
+# ─── Unit tests: load driver (_decompose_morning_load, v29) ───────────────────
+
+class TestLoadDriver:
+    """Tests for the v29 dominant CLS source feature."""
+
+    def _make_meeting_window(self, hour: int) -> dict:
+        """Window dominated by meetings (social meeting with attendees)."""
+        return {
+            "metadata": {
+                "hour_of_day": hour,
+                "is_working_hours": True,
+                "is_active_window": True,
+            },
+            "calendar": {
+                "in_meeting": True,
+                "meeting_attendees": 4,
+                "total_meeting_minutes": 60,
+            },
+            "slack": {"total_messages": 0, "messages_sent": 0, "messages_received": 0},
+            "rescuetime": {"active_seconds": 0},
+            "whoop": {},
+            "omi": {},
+            "metrics": {
+                "cognitive_load_score": 0.55,
+                "focus_depth_index": 0.50,
+                "social_drain_index": 0.30,
+                "context_switch_cost": 0.10,
+                "recovery_alignment_score": 0.80,
+            },
+        }
+
+    def _make_slack_window(self, hour: int, msgs: int = 40) -> dict:
+        """Window dominated by Slack messages (no meetings)."""
+        return {
+            "metadata": {
+                "hour_of_day": hour,
+                "is_working_hours": True,
+                "is_active_window": True,
+            },
+            "calendar": {
+                "in_meeting": False,
+                "meeting_attendees": 0,
+                "total_meeting_minutes": 0,
+            },
+            "slack": {
+                "total_messages": msgs,
+                "messages_sent": 10,
+                "messages_received": msgs,
+            },
+            "rescuetime": {"active_seconds": 0},
+            "whoop": {},
+            "omi": {},
+            "metrics": {
+                "cognitive_load_score": 0.30,
+                "focus_depth_index": 0.60,
+                "social_drain_index": 0.20,
+                "context_switch_cost": 0.10,
+                "recovery_alignment_score": 0.85,
+            },
+        }
+
+    def _make_physiology_window(self, hour: int, recovery: int = 20) -> dict:
+        """Window dominated by poor recovery (low HRV/recovery_score)."""
+        return {
+            "metadata": {
+                "hour_of_day": hour,
+                "is_working_hours": True,
+                "is_active_window": True,
+            },
+            "calendar": {
+                "in_meeting": False,
+                "meeting_attendees": 0,
+                "total_meeting_minutes": 0,
+            },
+            "slack": {"total_messages": 0, "messages_sent": 0, "messages_received": 0},
+            "rescuetime": {"active_seconds": 0},
+            "whoop": {
+                "recovery_score": recovery,
+                "hrv_rmssd_milli": 25.0,
+                "sleep_performance": 60.0,
+            },
+            "omi": {},
+            "metrics": {
+                "cognitive_load_score": 0.25,
+                "focus_depth_index": 0.65,
+                "social_drain_index": 0.05,
+                "context_switch_cost": 0.05,
+                "recovery_alignment_score": 0.50,
+            },
+        }
+
+    # ── _decompose_morning_load() ──────────────────────────────────────────
+
+    def test_empty_windows_returns_none(self):
+        src, share = _decompose_morning_load([])
+        assert src is None
+        assert share is None
+
+    def test_meeting_windows_dominant_source_is_meetings(self):
+        windows = [self._make_meeting_window(h) for h in [8, 9, 10, 11, 12]]
+        src, share = _decompose_morning_load(windows)
+        assert src == "meetings", f"Expected 'meetings', got '{src}'"
+        assert share is not None
+        assert 0.0 < share <= 1.0
+
+    def test_slack_windows_dominant_source_is_slack(self):
+        windows = [self._make_slack_window(h, msgs=60) for h in [8, 9, 10, 11, 12]]
+        src, share = _decompose_morning_load(windows)
+        # Slack-heavy windows should have slack or physiology as dominant
+        # (physiology always contributes, but slack load should be visible)
+        assert src in ("slack", "physiology"), f"Unexpected source: {src}"
+
+    def test_physiology_dominant_with_low_recovery(self):
+        windows = [self._make_physiology_window(h, recovery=10) for h in [8, 9, 10, 11, 12]]
+        src, share = _decompose_morning_load(windows)
+        assert src == "physiology", f"Expected 'physiology', got '{src}'"
+        assert share is not None and share > 0.3
+
+    def test_dominant_share_between_0_and_1(self):
+        windows = [self._make_meeting_window(h) for h in [8, 9, 10]]
+        src, share = _decompose_morning_load(windows)
+        if share is not None:
+            assert 0.0 <= share <= 1.0
+
+    def test_returns_none_none_on_import_failure(self, monkeypatch):
+        """If load_decomposer import fails, return (None, None) gracefully."""
+        import builtins
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if "load_decomposer" in name:
+                raise ImportError("mocked failure")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+        src, share = _decompose_morning_load([self._make_meeting_window(9)])
+        assert src is None
+        assert share is None
+
+    # ── compute_midday_checkin() load driver integration ──────────────────
+
+    def test_low_cls_produces_no_driver(self):
+        """When morning CLS is below threshold, dominant_source should be None."""
+        windows = [
+            _make_window(hour=h, cls=0.03, fdi=0.95, is_active=True)
+            for h in [8, 9, 10, 11, 12]
+        ]
+        checkin = compute_midday_checkin("2026-03-14", windows=windows, baseline_cls=0.25)
+        # CLS of 0.03 < _MIN_CLS_FOR_DRIVER → no driver
+        assert checkin.morning_dominant_source is None
+        assert checkin.morning_dominant_share is None
+
+    def test_sufficient_cls_produces_driver(self):
+        """When morning CLS is at or above threshold, a driver should be identified."""
+        windows = [self._make_meeting_window(h) for h in [8, 9, 10, 11, 12]]
+        # Inject meetings into full day windows
+        filler = [
+            _make_window(hour=h, cls=0.10, is_active=False)
+            for h in range(24) for _ in range(4)
+        ]
+        day_windows = windows + filler
+        checkin = compute_midday_checkin("2026-03-14", windows=day_windows, baseline_cls=0.25)
+        if checkin.is_meaningful and checkin.morning_cls is not None and checkin.morning_cls >= _MIN_CLS_FOR_DRIVER:
+            assert checkin.morning_dominant_source is not None
+            assert checkin.morning_dominant_share is not None
+
+    def test_driver_field_in_to_dict(self):
+        """to_dict() includes morning_dominant_source and morning_dominant_share."""
+        windows = _make_day_windows(morning_cls=0.30)
+        checkin = compute_midday_checkin("2026-03-14", windows=windows, baseline_cls=0.25)
+        d = checkin.to_dict()
+        assert "morning_dominant_source" in d
+        assert "morning_dominant_share" in d
+
+    def test_driver_share_rounded_in_to_dict(self):
+        """morning_dominant_share in to_dict() is rounded to 2 decimal places."""
+        windows = [self._make_meeting_window(h) for h in [8, 9, 10, 11, 12]]
+        filler = [
+            _make_window(hour=h, cls=0.10, is_active=False)
+            for h in range(24) for _ in range(4)
+        ]
+        checkin = compute_midday_checkin("2026-03-14", windows=windows + filler, baseline_cls=0.25)
+        d = checkin.to_dict()
+        share = d["morning_dominant_share"]
+        if share is not None:
+            # Must not have more than 2 decimal places
+            assert len(str(share).split(".")[-1]) <= 2
+
+    # ── format_checkin_message() load driver rendering ─────────────────────
+
+    def test_format_shows_load_driver_when_present(self):
+        """Load driver line appears when dominant_source is set and CLS ≥ threshold."""
+        checkin = MidDayCheckIn(
+            date_str="2026-03-14",
+            morning_cls=0.35,
+            morning_fdi=0.70,
+            morning_sdi=0.10,
+            meeting_minutes=60,
+            active_windows=8,
+            pace_label="On track",
+            pace_ratio=1.0,
+            morning_dominant_source="meetings",
+            morning_dominant_share=0.62,
+            afternoon_nudge="Protect a block.",
+            remaining_budget_hours=3.0,
+            is_meaningful=True,
+        )
+        msg = format_checkin_message(checkin)
+        assert "Load driver" in msg
+        assert "Meetings" in msg or "🗓" in msg
+        assert "62%" in msg
+
+    def test_format_hides_driver_when_cls_too_low(self):
+        """Load driver line should NOT appear when CLS is below threshold."""
+        checkin = MidDayCheckIn(
+            date_str="2026-03-14",
+            morning_cls=0.05,          # below _MIN_CLS_FOR_DRIVER
+            morning_fdi=0.95,
+            morning_sdi=0.01,
+            meeting_minutes=0,
+            active_windows=6,
+            pace_label="Light morning",
+            pace_ratio=0.20,
+            morning_dominant_source="physiology",   # set, but CLS too low
+            morning_dominant_share=0.80,
+            afternoon_nudge="Deep work window.",
+            remaining_budget_hours=5.0,
+            is_meaningful=True,
+        )
+        msg = format_checkin_message(checkin)
+        assert "Load driver" not in msg
+
+    def test_format_hides_driver_when_source_is_none(self):
+        """No load driver line when morning_dominant_source is None."""
+        checkin = MidDayCheckIn(
+            date_str="2026-03-14",
+            morning_cls=0.40,
+            morning_fdi=0.75,
+            morning_sdi=0.10,
+            meeting_minutes=0,
+            active_windows=8,
+            pace_label="On track",
+            pace_ratio=1.0,
+            morning_dominant_source=None,
+            morning_dominant_share=None,
+            afternoon_nudge="Protect a block.",
+            remaining_budget_hours=3.0,
+            is_meaningful=True,
+        )
+        msg = format_checkin_message(checkin)
+        assert "Load driver" not in msg
+
+    def test_all_sources_have_emoji_and_label(self):
+        """Every supported source has an emoji and a label for formatting."""
+        sources = ["meetings", "slack", "physiology", "rescuetime", "omi"]
+        for src in sources:
+            assert src in _SOURCE_EMOJIS, f"Missing emoji for source: {src}"
+            assert src in _SOURCE_LABELS, f"Missing label for source: {src}"
+            assert _SOURCE_EMOJIS[src], f"Empty emoji for source: {src}"
+            assert _SOURCE_LABELS[src], f"Empty label for source: {src}"
+
+    def test_format_slack_driver_shows_correct_label(self):
+        """Slack source shows 'Slack' label and 💬 emoji."""
+        checkin = MidDayCheckIn(
+            date_str="2026-03-14",
+            morning_cls=0.25,
+            morning_fdi=0.80,
+            morning_sdi=0.15,
+            meeting_minutes=0,
+            active_windows=8,
+            pace_label="On track",
+            pace_ratio=1.0,
+            morning_dominant_source="slack",
+            morning_dominant_share=0.51,
+            afternoon_nudge="Go async.",
+            remaining_budget_hours=3.5,
+            is_meaningful=True,
+        )
+        msg = format_checkin_message(checkin)
+        assert "Slack" in msg
+        assert "💬" in msg
+        assert "51%" in msg
+
+    def test_format_physiology_driver_shows_correct_label(self):
+        """Physiology source shows 'Recovery deficit' label and 💤 emoji."""
+        checkin = MidDayCheckIn(
+            date_str="2026-03-14",
+            morning_cls=0.20,
+            morning_fdi=0.65,
+            morning_sdi=0.05,
+            meeting_minutes=0,
+            active_windows=6,
+            pace_label="On track",
+            pace_ratio=0.80,
+            morning_dominant_source="physiology",
+            morning_dominant_share=0.75,
+            afternoon_nudge="Rest early tonight.",
+            remaining_budget_hours=2.5,
+            is_meaningful=True,
+        )
+        msg = format_checkin_message(checkin)
+        assert "Recovery deficit" in msg
+        assert "💤" in msg

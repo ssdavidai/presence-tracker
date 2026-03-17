@@ -1,5 +1,5 @@
 """
-Presence Tracker — Midday Cognitive Check-In (v28)
+Presence Tracker — Midday Cognitive Check-In (v29)
 
 Answers: *"How is my morning going versus plan?"*
 
@@ -14,8 +14,9 @@ and sends a brief Slack pulse with:
   1. Morning load so far     — actual CLS for the last 4–5 hours of work
   2. Load vs plan            — actual vs predicted (from morning brief forecast)
   3. Focus quality           — how deep was the morning focus?
-  4. Afternoon recommendation — one concrete nudge based on current state
-  5. Remaining budget        — how much quality cognitive time is left today
+  4. Load driver             — dominant source of this morning's CLS (v29)
+  5. Afternoon recommendation — one concrete nudge based on current state
+  6. Remaining budget        — how much quality cognitive time is left today
 
 ## Design
 
@@ -46,6 +47,22 @@ Key constraints:
     remaining_budget = compute_cognitive_budget() × (1 - morning_fraction)
                        where morning_fraction = active_morning_hours / DCB_hours
 
+## Load driver (v29)
+
+The dominant source of the morning's cognitive load is surfaced as
+`morning_dominant_source`.  It is derived by running _decompose_window()
+from `analysis/load_decomposer.py` over active morning windows only, then
+summing the per-source contributions and finding the argmax.
+
+Sources:  meetings | slack | physiology | rescuetime | omi
+
+Example output in the Slack message:
+    Load driver:    💬 Slack  (47% of morning CLS)
+
+When the morning CLS is very low (< 0.10), the driver line is omitted
+because the signal is too weak to be meaningful.  When fewer than
+MIN_ACTIVE_WINDOWS windows are available, morning_dominant_source is None.
+
 ## Output
 
     MidDayCheckIn dataclass:
@@ -57,6 +74,8 @@ Key constraints:
       - active_windows: int
       - pace_label: str          — "Running hot" | "On track" | "Light morning"
       - pace_ratio: float | None
+      - morning_dominant_source: str | None  — v29: "meetings"|"slack"|"physiology"|"rescuetime"|"omi"
+      - morning_dominant_share: float | None — v29: fraction of CLS from dominant source (0–1)
       - afternoon_nudge: str     — one actionable sentence
       - remaining_budget_hours: float | None
       - is_meaningful: bool
@@ -165,6 +184,8 @@ class MidDayCheckIn:
     active_windows: int                  # number of active morning windows
     pace_label: str                      # "Running hot" | "On track" | "Light morning"
     pace_ratio: Optional[float]          # morning_cls / baseline_cls
+    morning_dominant_source: Optional[str]   # v29: dominant CLS driver ("meetings"|"slack"|...)
+    morning_dominant_share: Optional[float]  # v29: fraction of CLS from dominant source (0–1)
     afternoon_nudge: str                 # one concrete recommendation
     remaining_budget_hours: Optional[float]  # estimated quality hours left today
     is_meaningful: bool                  # False when < MIN_ACTIVE_WINDOWS
@@ -179,6 +200,12 @@ class MidDayCheckIn:
             "active_windows": self.active_windows,
             "pace_label": self.pace_label,
             "pace_ratio": round(self.pace_ratio, 2) if self.pace_ratio is not None else None,
+            "morning_dominant_source": self.morning_dominant_source,
+            "morning_dominant_share": (
+                round(self.morning_dominant_share, 2)
+                if self.morning_dominant_share is not None
+                else None
+            ),
             "afternoon_nudge": self.afternoon_nudge,
             "remaining_budget_hours": (
                 round(self.remaining_budget_hours, 1)
@@ -237,6 +264,8 @@ def compute_midday_checkin(
             active_windows=0,
             pace_label="Light morning",
             pace_ratio=None,
+            morning_dominant_source=None,
+            morning_dominant_share=None,
             afternoon_nudge="No data available for today yet.",
             remaining_budget_hours=None,
             is_meaningful=False,
@@ -267,6 +296,8 @@ def compute_midday_checkin(
             active_windows=len(active_morning),
             pace_label="Light morning",
             pace_ratio=None,
+            morning_dominant_source=None,
+            morning_dominant_share=None,
             afternoon_nudge="Morning is still quiet — no check-in data yet.",
             remaining_budget_hours=None,
             is_meaningful=False,
@@ -330,6 +361,15 @@ def compute_midday_checkin(
         consumed = morning_hours * intensity
         remaining_budget_hours = max(0.0, round(dcb_hours - consumed, 1))
 
+    # ── Load driver (v29) ─────────────────────────────────────────────────
+    # Only compute when there is meaningful load to attribute
+    morning_dominant_source: Optional[str] = None
+    morning_dominant_share: Optional[float] = None
+    if morning_cls is not None and morning_cls >= _MIN_CLS_FOR_DRIVER:
+        morning_dominant_source, morning_dominant_share = _decompose_morning_load(
+            active_morning
+        )
+
     # ── Afternoon nudge ───────────────────────────────────────────────────
     afternoon_nudge = _build_afternoon_nudge(
         morning_cls=morning_cls,
@@ -349,6 +389,8 @@ def compute_midday_checkin(
         active_windows=len(active_morning),
         pace_label=pace_label,
         pace_ratio=round(pace_ratio, 2) if pace_ratio is not None else None,
+        morning_dominant_source=morning_dominant_source,
+        morning_dominant_share=morning_dominant_share,
         afternoon_nudge=afternoon_nudge,
         remaining_budget_hours=remaining_budget_hours,
         is_meaningful=True,
@@ -417,6 +459,81 @@ def _load_dcb_hours(date_str: str, windows: list[dict]) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+# ─── Load driver computation (v29) ───────────────────────────────────────────
+
+# Source emoji — mirrors load_decomposer.py SOURCE_EMOJIS
+_SOURCE_EMOJIS = {
+    "meetings":    "🗓",
+    "slack":       "💬",
+    "physiology":  "💤",
+    "rescuetime":  "💻",
+    "omi":         "🎙",
+}
+
+# Source human labels
+_SOURCE_LABELS = {
+    "meetings":    "Meetings",
+    "slack":       "Slack",
+    "physiology":  "Recovery deficit",
+    "rescuetime":  "Screen activity",
+    "omi":         "Conversations",
+}
+
+# Minimum CLS mean to bother surfacing the driver (below this the signal is noise)
+_MIN_CLS_FOR_DRIVER = 0.10
+
+
+def _decompose_morning_load(
+    active_windows: list[dict],
+) -> tuple[Optional[str], Optional[float]]:
+    """
+    Identify the dominant source of cognitive load across morning active windows.
+
+    Runs the same per-window decomposition logic as load_decomposer._decompose_window
+    directly on the supplied window list so no store read is needed.
+
+    Returns
+    -------
+    (dominant_source, dominant_share) or (None, None) on failure / trivial load.
+
+    dominant_source : str — one of "meetings", "slack", "physiology",
+                            "rescuetime", "omi"
+    dominant_share  : float — fraction of total CLS attributable to the dominant
+                              source (0.0–1.0)
+    """
+    if not active_windows:
+        return None, None
+
+    try:
+        # Import the private helper directly to avoid code duplication.
+        # This is an intra-package import (same analysis/ folder).
+        from analysis.load_decomposer import _decompose_window  # type: ignore[import]
+    except ImportError:
+        return None, None
+
+    sources = ["meetings", "slack", "physiology", "rescuetime", "omi"]
+    totals: dict[str, float] = {s: 0.0 for s in sources}
+    cls_total = 0.0
+
+    for w in active_windows:
+        try:
+            comp = _decompose_window(w)
+            cls_total += comp.get("cls_computed", 0.0)
+            for s in sources:
+                totals[s] += comp.get(s, 0.0)
+        except Exception:
+            continue  # never let a bad window crash the midday check-in
+
+    if cls_total <= 0:
+        return None, None
+
+    # Find the dominant source
+    dominant = max(sources, key=lambda s: totals[s])
+    dominant_share = totals[dominant] / cls_total if cls_total > 0 else 0.0
+
+    return dominant, round(dominant_share, 2)
 
 
 # ─── Afternoon nudge builder ──────────────────────────────────────────────────
@@ -500,14 +617,15 @@ def format_checkin_message(checkin: "MidDayCheckIn") -> str:
     """
     Format the midday check-in as a brief Slack message.
 
-    Target: 4–6 lines. Concise, actionable.
+    Target: 4–7 lines. Concise, actionable.
 
-    Example:
-        ☀️ *Midday pulse — Monday 13:00*
+    Example (v29 with load driver):
+        ☀️ *Midday pulse — Monday*
 
         Morning load:   light (CLS 0.08) — deep focus quality
         Meetings:       45min
         Pace:           ✅ On track
+        Load driver:    🗓 Meetings  (62%)
         Budget left:    ~4.5h quality hours remaining
 
         → Protect a 90-min block this afternoon for deep work.
@@ -542,6 +660,22 @@ def format_checkin_message(checkin: "MidDayCheckIn") -> str:
         "Light morning": "🟢",
     }.get(checkin.pace_label, "⚪")
     lines.append(f"Pace:           {pace_emoji} {checkin.pace_label}")
+
+    # Load driver (v29) — only show when load is meaningful
+    if (
+        checkin.morning_dominant_source is not None
+        and checkin.morning_cls is not None
+        and checkin.morning_cls >= _MIN_CLS_FOR_DRIVER
+    ):
+        src = checkin.morning_dominant_source
+        emoji = _SOURCE_EMOJIS.get(src, "")
+        label = _SOURCE_LABELS.get(src, src.title())
+        share_pct = (
+            f"  ({int(checkin.morning_dominant_share * 100)}%)"
+            if checkin.morning_dominant_share is not None
+            else ""
+        )
+        lines.append(f"Load driver:    {emoji} {label}{share_pct}")
 
     # Remaining budget
     if checkin.remaining_budget_hours is not None:
@@ -661,6 +795,20 @@ def main() -> None:
                 print(f"  (×{checkin.pace_ratio:.2f} baseline)")
             else:
                 print()
+            if (
+                checkin.morning_dominant_source is not None
+                and checkin.morning_cls is not None
+                and checkin.morning_cls >= _MIN_CLS_FOR_DRIVER
+            ):
+                src = checkin.morning_dominant_source
+                emoji = _SOURCE_EMOJIS.get(src, "")
+                label = _SOURCE_LABELS.get(src, src.title())
+                share_pct = (
+                    f"  ({int(checkin.morning_dominant_share * 100)}%)"
+                    if checkin.morning_dominant_share is not None
+                    else ""
+                )
+                print(f"  Load driver:    {emoji} {label}{share_pct}")
             if checkin.remaining_budget_hours is not None:
                 print(f"  Budget left:    ~{checkin.remaining_budget_hours:.1f}h")
             print()
