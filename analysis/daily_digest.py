@@ -202,6 +202,39 @@ v2.5 — Sleep Target Advisor:
   - format_digest_message() renders it after the Tomorrow preview section
   - 67 dedicated tests in tests/test_sleep_target.py
 
+v2.7 — Load Volatility Index in Nightly Digest:
+  The digest now surfaces how *consistently* vs *erratically* cognitive load
+  varied throughout the day — the Load Volatility Index (LVI).
+
+  Average CLS answers "how much load was there?".  LVI answers "was it smooth
+  or chaotic?".  Two days with CLS = 0.40 feel completely different:
+    Day A: steady 0.40 throughout — predictable, manageable
+    Day B: 0.05 → 0.80 → 0.05 → 0.75 — cognitive whiplash
+
+  LVI is computed as 1.0 − min(cls_std / 0.35, 1.0) over active working-hour
+  windows (meeting or Slack activity present).
+
+  Tiers:
+    ≥ 0.80 → Smooth    (not surfaced — all good)
+    0.60–0.80 → Steady  (not surfaced — normal variation)
+    0.40–0.60 → Variable (surfaced as a note after the sparkline)
+    < 0.40   → Volatile  (surfaced as a warning after the sparkline)
+
+  Only shown when noteworthy (variable or volatile) — smooth/steady days
+  don't need extra commentary.  The sparkline already shows that visually.
+
+  Example output when volatile:
+    `7am ░░░█░░█░░░░░░░░ 10pm`
+    _⚡ Load pattern: Volatile (LVI 0.28, std 0.26) — high cognitive switching cost_
+
+  Uses `analysis/load_volatility.py` for computation.
+
+  Implementation:
+  - _compute_load_volatility_for_digest(windows) — exception-isolated helper
+  - compute_digest() adds "load_volatility" key to return dict
+  - format_digest_message() renders it as an italic note after the sparkline
+  - Tests: tests/test_load_volatility.py
+
 v2.6 — Tomorrow's Cognitive Budget in Nightly Digest:
   The nightly digest's "Tomorrow" section now includes a cognitive budget
   estimate for tomorrow — completing the forward-looking preview that already
@@ -1112,6 +1145,52 @@ def _compute_tomorrow_cognitive_budget_for_digest(
         return None  # Never crash the digest over cognitive budget
 
 
+def _compute_load_volatility_for_digest(windows: list[dict]) -> Optional[dict]:
+    """
+    Compute the Load Volatility Index for the nightly digest (v2.7).
+
+    Measures how consistently vs erratically cognitive load varied throughout
+    the day.  Two days with the same average CLS can feel completely different:
+    one smooth and predictable, the other a rollercoaster of spikes.
+
+    Returns a compact dict:
+        {
+            "lvi":         float,   # 0.0 (volatile) → 1.0 (smooth)
+            "cls_std":     float,   # Raw CLS standard deviation
+            "cls_range":   float,   # Peak swing (max - min)
+            "label":       str,     # 'smooth' | 'steady' | 'variable' | 'volatile'
+            "line":        str,     # Slack-ready one-liner
+            "insight":     str,     # One-sentence explanation
+            "windows_used": int,
+            "is_meaningful": bool,
+        }
+
+    Returns None on error or when is_meaningful=False (< 3 active windows).
+    Fully exception-isolated — never crashes the digest.
+    """
+    try:
+        from analysis.load_volatility import compute_load_volatility, format_lvi_line
+
+        lvi = compute_load_volatility(windows)
+
+        if not lvi.is_meaningful:
+            return None
+
+        return {
+            "lvi": lvi.lvi,
+            "cls_std": lvi.cls_std,
+            "cls_mean": lvi.cls_mean,
+            "cls_range": lvi.cls_range,
+            "label": lvi.label,
+            "line": format_lvi_line(lvi),
+            "insight": lvi.insight,
+            "windows_used": lvi.windows_used,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None  # Never crash the digest over LVI
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1459,6 +1538,14 @@ def compute_digest(windows: list[dict]) -> dict:
             windows,
             precomputed_cdi=cognitive_debt,
         ),
+        # v2.7: Load Volatility Index — how spiky vs consistent was today's CLS?
+        # Measures the standard deviation of CLS across active working-hour windows.
+        # Avg CLS tells you *how much* load; LVI tells you *how erratic* the load was.
+        # Two days with identical avg CLS can feel completely different: one smooth and
+        # predictable, the other a rollercoaster of spikes.  Only shown in the digest
+        # when volatility is noteworthy (variable or volatile tier).
+        # (None when < 3 active windows or computation fails)
+        "load_volatility": _compute_load_volatility_for_digest(windows),
     }
 
 
@@ -1657,6 +1744,7 @@ def format_digest_message(digest: dict) -> str:
     load_decomposition = digest.get("load_decomposition")              # v2.4: load source breakdown or None
     sleep_target = digest.get("sleep_target")                          # v2.5: sleep target advisor or None
     tomorrow_cognitive_budget = digest.get("tomorrow_cognitive_budget") # v2.6: tomorrow's quality hours or None
+    load_volatility = digest.get("load_volatility")                    # v2.7: LVI — how spiky was load? or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -1706,6 +1794,17 @@ def format_digest_message(digest: dict) -> str:
     if hourly_cls_curve:
         sparkline = _format_hourly_sparkline(hourly_cls_curve)
         lines.append(f"  `7am {sparkline} 10pm`")
+
+    # ── Load Volatility Index (v2.7) ──────────────────────────────────────
+    # Surface LVI only when the pattern is noteworthy (variable or volatile).
+    # Smooth/steady days don't need a warning — the sparkline already shows that.
+    # Variable/volatile days add context that the avg CLS alone doesn't capture.
+    if load_volatility and load_volatility.get("is_meaningful"):
+        lvi_label = load_volatility.get("label", "steady")
+        if lvi_label in ("variable", "volatile"):
+            lvi_line = load_volatility.get("line", "")
+            if lvi_line:
+                lines.append(f"  _{lvi_line}_")
 
     # ── Focus quality (active windows only) ──
     if avg_fdi is not None and active_windows > 0:
