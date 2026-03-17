@@ -301,6 +301,33 @@ v2.6 — Tomorrow's Cognitive Budget in Nightly Digest:
   - format_digest_message() renders it as a single line in the Tomorrow section,
     between load forecast and focus plan
   - Tests: tests/test_tomorrow_cognitive_budget_digest.py
+
+v3.0 — Actionable Insights in the nightly digest:
+  The Actionable Insights Generator (analysis/actionable_insights.py) is now wired
+  into the nightly digest.  Previously only available in the morning brief as a single
+  terse headline, the evening digest now surfaces up to 3 evidence-backed behavioural
+  recommendations.
+
+  The evening is the right moment for this:
+  - You have just lived the day — the patterns are fresh in memory.
+  - You can reflect and set intentions for tomorrow overnight.
+  - Acting on insights (e.g. "schedule a buffer after back-to-back meetings")
+    works better when planned the evening before, not discovered mid-morning.
+
+  The digest shows a compact section (only when ≥7 days of history exists):
+      💡 *Behaviour insights (14 days):*
+      1. *Post-meeting recovery gap*  🔴
+         → Schedule 15-min buffers after back-to-back calls.
+         _Data: FDI drops 38% in the window after 2+ consecutive meetings (8/12 days)_
+
+  The section is omitted entirely when fewer than MIN_DAYS days of history exist,
+  no insights are detected, or any exception occurs — never crashes the digest.
+
+  Implementation:
+  - _compute_actionable_insights_for_digest(date_str) — exception-isolated helper
+  - compute_digest() adds "actionable_insights" key to return dict
+  - format_digest_message() renders it as a named section before the BRI warning
+  - Tests: tests/test_actionable_insights.py (existing coverage)
 """
 
 import json
@@ -1297,6 +1324,53 @@ def _compute_burnout_risk_for_digest(date_str: str) -> Optional[dict]:
         return None  # Never crash the digest over burnout risk
 
 
+def _compute_actionable_insights_for_digest(date_str: str) -> Optional[dict]:
+    """
+    Compute actionable insights for the nightly digest (v3.0).
+
+    Returns up to 3 evidence-backed behavioural recommendations drawn from the
+    last 14 days of JSONL history.  Unlike the morning brief (which shows only
+    the single top insight as a terse headline), the nightly digest renders the
+    full section — the right moment for deeper reflection and forward planning.
+
+    Returns a dict with:
+        is_meaningful    — True when ≥1 insight was found
+        insights         — list of dicts (title, headline, evidence, impact_label, rank)
+        days_analysed    — number of days in the analysis window
+        section          — pre-formatted Slack markdown block
+
+    Returns None when:
+    - Fewer than MIN_DAYS days of data are available
+    - No behavioural patterns detected
+    - Any exception occurs (never crash the digest)
+    """
+    try:
+        from analysis.actionable_insights import (
+            compute_actionable_insights,
+            format_insights_section,
+        )
+        ai = compute_actionable_insights(as_of_date_str=date_str, days=14)
+        if not ai.is_meaningful or not ai.insights:
+            return None
+        return {
+            "is_meaningful": True,
+            "insights": [
+                {
+                    "title": ins.title,
+                    "headline": ins.headline,
+                    "evidence": ins.evidence,
+                    "impact_label": ins.impact_label,
+                    "rank": ins.rank,
+                }
+                for ins in ai.insights
+            ],
+            "days_analysed": ai.days_analysed,
+            "section": format_insights_section(ai),
+        }
+    except Exception:
+        return None  # Never crash the digest over actionable insights
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1668,6 +1742,12 @@ def compute_digest(windows: list[dict]) -> dict:
         # need no nightly intervention, they surface in the Sunday weekly summary.
         # (None when < 14 days of data or BRI is healthy/watch)
         "burnout_risk": _compute_burnout_risk_for_digest(date_str),
+        # v3.0: Actionable Insights — up to 3 evidence-backed behaviour recommendations
+        # drawn from the last 14 days of JSONL history.  Evening placement is intentional:
+        # David has just lived the day and can reflect + set intentions for tomorrow.
+        # Complements the morning brief's single top-headline with the full insights set.
+        # (None when < MIN_DAYS history, no patterns detected, or computation fails)
+        "actionable_insights": _compute_actionable_insights_for_digest(date_str),
     }
 
 
@@ -1868,6 +1948,7 @@ def format_digest_message(digest: dict) -> str:
     tomorrow_cognitive_budget = digest.get("tomorrow_cognitive_budget") # v2.6: tomorrow's quality hours or None
     load_volatility = digest.get("load_volatility")                    # v2.7: LVI — how spiky was load? or None
     burnout_risk = digest.get("burnout_risk")                          # v2.9: BRI — multi-signal trajectory or None
+    actionable_insights = digest.get("actionable_insights")            # v3.0: behaviour recommendations or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -2238,6 +2319,18 @@ def format_digest_message(digest: dict) -> str:
         if sleep_section:
             lines.append("")
             lines.append(sleep_section)
+
+    # ── Actionable Insights (v3.0) — evidence-backed behaviour recommendations ──
+    # Shown near the end of the digest — after tomorrow's plan (forward-looking)
+    # but before the BRI strategic warning.  Evening placement is deliberate:
+    # David has just lived the day, patterns are fresh, and he can set intentions
+    # for tomorrow while planning sleep and schedule adjustments.
+    # Only rendered when ≥1 insight is detected from the last 14 days of history.
+    if isinstance(actionable_insights, dict) and actionable_insights.get("is_meaningful"):
+        ai_section = actionable_insights.get("section", "")
+        if ai_section:
+            lines.append("")
+            lines.append(ai_section)
 
     # ── Burnout Risk Index (v2.9) — only surfaces at caution/high_risk/critical ──
     # Shown at the end of the digest as a strategic multi-week signal distinct from
