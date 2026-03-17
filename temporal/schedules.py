@@ -34,6 +34,7 @@ from temporal.workflows import (
     DailyIngestionWorkflow,
     WeeklyAnalysisWorkflow,
     MorningBriefWorkflow,
+    MidDayCheckInWorkflow,
     MonthlyMLRetrainWorkflow,
 )
 
@@ -49,6 +50,16 @@ SCHEDULES = [
         "workflow": MorningBriefWorkflow,
         "workflow_id": "presence-morning-brief-workflow",
         "description": "Morning readiness brief — WHOOP readiness + day planning recommendation",
+    },
+    {
+        "id": "presence-midday-checkin",
+        # 12:00 UTC = 13:00 Budapest (CET/UTC+1).
+        # Fires mid-afternoon after 4–5 hours of workday data are in JSONL.
+        # Gracefully skips quiet mornings (< 3 active windows).
+        "cron": "0 12 * * 1-5",
+        "workflow": MidDayCheckInWorkflow,
+        "workflow_id": "presence-midday-checkin-workflow",
+        "description": "Midday cognitive check-in — morning load pulse + afternoon recommendation (Mon–Fri)",
     },
     {
         "id": "presence-daily-ingestion",

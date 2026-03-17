@@ -13,6 +13,7 @@ Or with the run script:
 
 Registered workflows:
   - MorningBriefWorkflow        (07:00 Budapest — WHOOP readiness brief)
+  - MidDayCheckInWorkflow       (13:00 Budapest — midday cognitive pulse)
   - DailyIngestionWorkflow      (23:45 Budapest — collect + metrics + digest)
   - WeeklyAnalysisWorkflow      (Sunday 21:00 Budapest — intuition + summary)
   - MonthlyMLRetrainWorkflow    (1st of month 02:00 Budapest — ML model update)
@@ -20,10 +21,12 @@ Registered workflows:
 Registered activities:
   - ingest_day                  (daily data collection + metrics + JSONL write)
   - send_morning_readiness_brief (morning Slack DM)
+  - send_midday_checkin         (midday cognitive check-in Slack DM)
   - generate_daily_dashboard    (HTML dashboard generation)
   - run_anomaly_alerts          (CLS spike / FDI collapse / RAS streak checks)
   - run_weekly_intuition        (LLM weekly pattern report)
   - run_weekly_summary          (deterministic week-over-week summary)
+  - generate_weekly_dashboard   (weekly HTML dashboard)
   - retrain_ml_models           (monthly scikit-learn model retraining)
   - notify_slack_presence       (log message to #alfred-logs)
 """
@@ -44,8 +47,10 @@ from temporal.activities import (
     run_weekly_intuition,
     run_weekly_summary,
     send_morning_readiness_brief,
+    send_midday_checkin,
     notify_slack_presence,
     generate_daily_dashboard,
+    generate_weekly_dashboard,
     run_anomaly_alerts,
     retrain_ml_models,
 )
@@ -53,6 +58,7 @@ from temporal.workflows import (
     DailyIngestionWorkflow,
     WeeklyAnalysisWorkflow,
     MorningBriefWorkflow,
+    MidDayCheckInWorkflow,
     MonthlyMLRetrainWorkflow,
 )
 
@@ -69,6 +75,7 @@ async def main():
         task_queue=TASK_QUEUE,
         workflows=[
             MorningBriefWorkflow,
+            MidDayCheckInWorkflow,
             DailyIngestionWorkflow,
             WeeklyAnalysisWorkflow,
             MonthlyMLRetrainWorkflow,
@@ -76,7 +83,9 @@ async def main():
         activities=[
             ingest_day,
             send_morning_readiness_brief,
+            send_midday_checkin,
             generate_daily_dashboard,
+            generate_weekly_dashboard,
             run_anomaly_alerts,
             run_weekly_intuition,
             run_weekly_summary,
