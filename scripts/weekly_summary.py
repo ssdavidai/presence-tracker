@@ -1021,6 +1021,28 @@ def format_weekly_message(summary: dict) -> str:
     except Exception:
         pass  # pacing is non-critical — never block the weekly summary
 
+    # ── Conversation Intelligence (v2.6) ─────────────────────────────────────
+    # Analyses raw Omi transcript history directly — independent of JSONL store.
+    # Works even when full daily ingestion hasn't been run yet, because it reads
+    # ~/omi/transcripts/ directly.  Surfaces: speech load trend, peak conversation
+    # hour, language split, cognitive density, and actionable insights.
+    # Only shown when ≥ 3 days of Omi transcript data exist in the window.
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.conversation_intelligence import (
+            analyse_conversation_history,
+            format_conversation_intelligence_section,
+        )
+        # Use 14 days ending on the summary end_date to give a richer picture
+        ci = analyse_conversation_history(days=14, end_date_str=end_date)
+        if ci.is_meaningful:
+            ci_section = format_conversation_intelligence_section(ci)
+            if ci_section.strip():
+                lines.append("")
+                lines.append(ci_section.strip())
+    except Exception:
+        pass  # conversation intelligence is non-critical — never block the weekly summary
+
     lines.append("")
     lines.append("_Presence Tracker · weekly summary_")
 
