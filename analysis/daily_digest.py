@@ -235,6 +235,35 @@ v2.7 — Load Volatility Index in Nightly Digest:
   - format_digest_message() renders it as an italic note after the sparkline
   - Tests: tests/test_load_volatility.py
 
+v2.8 — Flow State Detection in Nightly Digest:
+  The nightly digest now surfaces detected "flow state" sessions — contiguous
+  blocks of high FDI + moderate CLS + low CSC lasting ≥ 30 minutes.
+
+  Unlike average FDI (which includes idle browsing, passive reading, or
+  exhausted quiet time), flow state requires the full triad:
+    - High focus depth (FDI ≥ 0.65) — sustained concentration
+    - Moderate cognitive load (CLS 0.12–0.62) — challenged but not overwhelmed
+    - Low fragmentation (CSC ≤ 0.35) — no context-switching noise
+
+  The flow score is total_flow_minutes / 120 (capped at 1.0), where 120 min
+  is considered a "full" flow day.  Labels: deep_flow | in_zone | brief | none.
+
+  Example output (after Focus Quality line):
+    *Focus Quality* ███████░░░ 78% (high, active windows)
+      🌊 Flow: Deep Flow — 2h 15m · peak 09:15–11:30
+    *Alignment* ████████░░ 82% (well-aligned)
+
+  Social meetings always break flow (they disrupt the sustained focus
+  condition).  Solo calendar blocks (0 attendees) do not.
+
+  Uses `analysis/flow_detector.py` for computation.
+
+  Implementation:
+  - _compute_flow_state_for_digest(windows) — exception-isolated helper
+  - compute_digest() adds "flow_state" key to return dict
+  - format_digest_message() renders it as a note after Focus Quality
+  - Tests: tests/test_flow_detector.py (56 tests)
+
 v2.6 — Tomorrow's Cognitive Budget in Nightly Digest:
   The nightly digest's "Tomorrow" section now includes a cognitive budget
   estimate for tomorrow — completing the forward-looking preview that already
@@ -1191,6 +1220,43 @@ def _compute_load_volatility_for_digest(windows: list[dict]) -> Optional[dict]:
         return None  # Never crash the digest over LVI
 
 
+def _compute_flow_state_for_digest(windows: list[dict]) -> Optional[dict]:
+    """
+    Exception-isolated wrapper for flow state detection.
+
+    Returns a dict with flow state data for the nightly digest, or None on error/
+    insufficient data.
+
+    The flow state detector identifies contiguous blocks of high FDI + moderate CLS
+    + low CSC (≥ 30 minutes) — actual "in the zone" periods, not just high average FDI.
+    """
+    try:
+        from analysis.flow_detector import (
+            detect_flow_states,
+            format_flow_line,
+            format_flow_section,
+        )
+
+        flow = detect_flow_states(windows)
+        if not flow.is_meaningful:
+            return None
+
+        return {
+            "flow_score":           flow.flow_score,
+            "flow_label":           flow.flow_label,
+            "total_flow_minutes":   flow.total_flow_minutes,
+            "peak_session":         flow.peak_session.to_dict() if flow.peak_session else None,
+            "session_count":        len(flow.flow_sessions),
+            "peak_hour":            flow.peak_hour,
+            "is_meaningful":        True,
+            "line":                 format_flow_line(flow),
+            "section":              format_flow_section(flow),
+            "insight":              flow.insight,
+        }
+    except Exception:
+        return None  # Never crash the digest over flow detection
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1546,6 +1612,13 @@ def compute_digest(windows: list[dict]) -> dict:
         # when volatility is noteworthy (variable or volatile tier).
         # (None when < 3 active windows or computation fails)
         "load_volatility": _compute_load_volatility_for_digest(windows),
+        # v2.8: Flow State Detection — contiguous windows of high FDI + moderate CLS + low CSC
+        # Identifies actual "flow state" sessions (sustained deep-work periods ≥ 30 min).
+        # Unlike FDI alone (which includes idle browsing), flow requires the full triad:
+        # engaged enough to have real load, focused enough to sustain it, undisrupted enough
+        # to maintain momentum.  The cognitive equivalent of an athletic "in the zone" session.
+        # (None when insufficient working-hour windows or computation fails)
+        "flow_state": _compute_flow_state_for_digest(windows),
     }
 
 
@@ -1813,6 +1886,17 @@ def format_digest_message(digest: dict) -> str:
         lines.append(f"*Focus Quality* {fdi_bar} {avg_fdi:.0%} ({fdi_label}, active windows)")
     elif active_windows == 0:
         lines.append("*Focus Quality* — no active work detected")
+
+    # ── Flow State (v2.8) ──────────────────────────────────────────────────
+    # Show the flow state line when any flow was detected (score > 0).
+    # Flow = high FDI + moderate CLS + low CSC, sustained ≥ 30 min.
+    # Complements FDI: high average FDI can include idle/passive windows;
+    # flow requires the full triad of engagement, focus, and continuity.
+    flow_state = digest.get("flow_state")
+    if flow_state and flow_state.get("is_meaningful") and flow_state.get("flow_score", 0) > 0:
+        flow_line = flow_state.get("line", "")
+        if flow_line:
+            lines.append(f"  {flow_line}")
 
     # ── Recovery alignment ──
     if avg_ras is not None:
