@@ -734,6 +734,35 @@ def _compute_cdi_forecast_for_digest(date_str: str) -> Optional[dict]:
         return None
 
 
+def _compute_recovery_plan_for_digest(date_str: str) -> Optional[dict]:
+    """
+    Compute the CDI Recovery Plan for the nightly digest (v3.1).
+
+    Returns a dict with 'is_meaningful' and 'line', or None on error.
+    Only fires when CDI ≥ loading (≥ 50) — silent otherwise.
+    Never raises — non-critical enhancement.
+    """
+    try:
+        from analysis.recovery_planner import compute_recovery_plan, format_recovery_line
+        plan = compute_recovery_plan(date_str)
+        if not plan.is_meaningful:
+            return None
+        return {
+            "is_meaningful": True,
+            "today_cdi": plan.today_cdi,
+            "today_tier": plan.today_tier,
+            "recommended_action": plan.recommended_action,
+            "recommendation_detail": plan.recommendation_detail,
+            "days_to_balanced_status_quo": plan.days_to_balanced_status_quo,
+            "days_to_balanced_light_day": plan.days_to_balanced_light_day,
+            "days_to_balanced_two_light": plan.days_to_balanced_two_light,
+            "days_to_balanced_rest_day": plan.days_to_balanced_rest_day,
+            "line": format_recovery_line(plan),
+        }
+    except Exception:
+        return None
+
+
 # ─── DPS helper ───────────────────────────────────────────────────────────────
 
 def _compute_dps_for_digest(windows: list[dict]) -> Optional[dict]:
@@ -1675,6 +1704,12 @@ def compute_digest(windows: list[dict]) -> dict:
         # CDI Trajectory Forecast — where is debt heading over the next 5 days?
         # (None when < 3 days of history or forecast unavailable)
         "cdi_forecast": _compute_cdi_forecast_for_digest(date_str),
+        # v3.1: CDI Recovery Plan — scenario-based payback schedule
+        # Answers: "what specific action restores cognitive balance fastest?"
+        # Models 4 scenarios: status quo, 1 light day, 2 light days, rest day.
+        # Only fires when CDI ≥ loading (≥ 50) — silent otherwise.
+        # (None when CDI is balanced/surplus or insufficient data)
+        "recovery_plan": _compute_recovery_plan_for_digest(date_str),
         # v1.8: Daily Presence Score — single 0–100 composite score
         # (None when insufficient working-hour windows)
         "presence_score": _compute_dps_for_digest(windows),
@@ -2202,6 +2237,16 @@ def format_digest_message(digest: dict) -> str:
         forecast_line = cdi_forecast.get("line", "")
         if forecast_line:
             lines.append(f"_{forecast_line}_")
+
+    # ── CDI Recovery Plan (v3.1) ──────────────────────────────────────────
+    # What's the fastest path back to balanced CDI?
+    # Only shown when CDI ≥ loading — models 4 recovery scenarios.
+    # Example: "🔋 Recovery path: 1 light day → balanced in 2d (vs 6d at current pace)"
+    recovery_plan = digest.get("recovery_plan")
+    if recovery_plan and recovery_plan.get("is_meaningful"):
+        recovery_line = recovery_plan.get("line", "")
+        if recovery_line:
+            lines.append(f"_{recovery_line}_")
 
     # ── ML Model Insights (v2.2) ─────────────────────────────────────────
     # Surface ML-derived signals: recovery prediction and behavioral anomalies.

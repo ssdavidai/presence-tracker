@@ -477,6 +477,9 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "load_volatility": _compute_load_volatility_for_report(windows),
         # Burnout Risk Index (v41) — 28-day multi-signal trajectory
         "burnout_risk": _compute_burnout_risk_for_report(date_str),
+        # CDI Recovery Planner (v3.1) — scenario-based payback schedule
+        # Only meaningful when CDI ≥ loading (≥ 50).
+        "recovery_plan": _compute_recovery_plan_for_report(date_str),
     }
 
 
@@ -556,6 +559,34 @@ def _compute_cdi_for_report(date_str: str) -> Optional[dict]:
             "days_in_surplus": debt.days_in_surplus,
             "trend_5d": round(debt.trend_5d, 4) if debt.trend_5d is not None else None,
             "line": format_cdi_line(debt),
+        }
+    except Exception:
+        return None
+
+
+def _compute_recovery_plan_for_report(date_str: str) -> Optional[dict]:
+    """
+    Compute the CDI Recovery Planner for the terminal report (v3.1).
+
+    Only fires when CDI ≥ loading (≥ 50).  Returns the Recovery Plan dict
+    or None when CDI is balanced/surplus or on error.
+    """
+    try:
+        from analysis.recovery_planner import compute_recovery_plan, format_recovery_line
+        plan = compute_recovery_plan(date_str)
+        if plan is None or not plan.is_meaningful:
+            return None
+        return {
+            "is_meaningful": True,
+            "today_cdi": plan.today_cdi,
+            "today_tier": plan.today_tier,
+            "recommended_action": plan.recommended_action,
+            "recommendation_detail": plan.recommendation_detail,
+            "days_to_balanced_status_quo": plan.days_to_balanced_status_quo,
+            "days_to_balanced_light_day": plan.days_to_balanced_light_day,
+            "days_to_balanced_two_light": plan.days_to_balanced_two_light,
+            "days_to_balanced_rest_day": plan.days_to_balanced_rest_day,
+            "line": format_recovery_line(plan),
         }
     except Exception:
         return None
@@ -947,6 +978,44 @@ def print_full(report: dict, show_windows: bool = False) -> None:
         print(_c("  ③ Cognitive Debt Index", BOLD))
         print(_c(f"  Insufficient history ({days_used} day{'s' if days_used != 1 else ''} — needs ≥3)", DIM))
         print()
+
+    # ── CDI Recovery Planner (v3.1) ───────────────────────────────────────────
+    # Scenario-based payback schedule — only shown when CDI ≥ loading (≥ 50).
+    # Answers: "what's the fastest path to balanced CDI?"
+    recovery_plan_data = report.get("recovery_plan")
+    if recovery_plan_data and recovery_plan_data.get("is_meaningful"):
+        try:
+            from analysis.recovery_planner import (
+                RecoveryPlan,
+                format_recovery_terminal,
+            )
+            # Reconstruct a minimal RecoveryPlan for formatting
+            rp = RecoveryPlan(
+                date_str=report.get("date", ""),
+                today_cdi=recovery_plan_data.get("today_cdi", 50.0),
+                today_tier=recovery_plan_data.get("today_tier", "loading"),
+                days_to_balanced_status_quo=recovery_plan_data.get("days_to_balanced_status_quo"),
+                days_to_balanced_light_day=recovery_plan_data.get("days_to_balanced_light_day"),
+                days_to_balanced_two_light=recovery_plan_data.get("days_to_balanced_two_light"),
+                days_to_balanced_rest_day=recovery_plan_data.get("days_to_balanced_rest_day"),
+                recommended_action=recovery_plan_data.get("recommended_action", ""),
+                recommendation_detail=recovery_plan_data.get("recommendation_detail", ""),
+                scenarios={},
+                recovery_signal_used=0.0,
+                load_signal_used=0.0,
+                days_of_history=0,
+                is_meaningful=True,
+            )
+            terminal_block = format_recovery_terminal(rp)
+            if terminal_block:
+                print(terminal_block)
+        except Exception:
+            # Graceful fallback: show the compact line
+            line = recovery_plan_data.get("line", "")
+            if line:
+                print(_c("  🔋 Recovery Planner", BOLD))
+                print(f"  {line}")
+                print()
 
     # ── Daily Cognitive Budget (v16.0) ────────────────────────────────────────
     # How many quality cognitive hours are available today?

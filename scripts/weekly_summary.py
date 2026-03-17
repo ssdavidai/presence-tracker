@@ -1116,6 +1116,26 @@ def format_weekly_message(summary: dict) -> str:
     except Exception:
         pass  # conversation intelligence is non-critical — never block the weekly summary
 
+    # ── CDI Recovery Planner (v3.1) ───────────────────────────────────────────
+    # Scenario-based payback schedule — models 4 recovery paths and recommends
+    # the most efficient action to restore cognitive balance.
+    # Only fires when CDI ≥ loading (≥ 50) — silent for balanced/surplus states.
+    # Positioned before BRI so recovery planning precedes longer-term risk signal.
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.recovery_planner import (
+            compute_recovery_plan,
+            format_recovery_section,
+        )
+        rp = compute_recovery_plan(end_date)
+        if rp.is_meaningful:
+            rp_section = format_recovery_section(rp)
+            if rp_section.strip():
+                lines.append("")
+                lines.append(rp_section.strip())
+    except Exception:
+        pass  # Recovery planner is non-critical — never block the weekly summary
+
     # ── Burnout Risk Index (v2.7) ─────────────────────────────────────────────
     # BRI analyses 4-week trends across HRV, sleep quality, cognitive load,
     # focus depth, and social drain to detect early burnout trajectory.
