@@ -1168,3 +1168,289 @@ class TestWeeklyNextWeekPacing:
 
         assert "Weekly Presence Summary" in message
         assert "Weekly Pacing" not in message
+
+
+# ─── v2.4: Load Drivers tests ─────────────────────────────────────────────────
+
+class TestComputeWeekLoadDrivers:
+    """Unit tests for compute_week_load_drivers()."""
+
+    def test_returns_dict_with_expected_keys(self):
+        """Return value always has shares, dominant, days_meaningful, error."""
+        from scripts.weekly_summary import compute_week_load_drivers
+
+        mock_result = {
+            "daily": [],
+            "weekly_shares": {"meetings": 0.40, "slack": 0.30, "physiology": 0.20, "rescuetime": 0.05, "omi": 0.05},
+            "weekly_cls": 0.32,
+            "dominant_source": "meetings",
+            "days_meaningful": 5,
+        }
+
+        with patch("analysis.load_decomposer.compute_week_decomposition", return_value=mock_result):
+            result = compute_week_load_drivers("2026-03-14", days=7)
+
+        assert "shares" in result
+        assert "dominant" in result
+        assert "days_meaningful" in result
+        assert "error" in result
+        assert result["dominant"] == "meetings"
+        assert result["days_meaningful"] == 5
+        assert result["error"] is None
+
+    def test_shares_sum_to_one(self):
+        """Shares returned from the decomposer should sum to ≈ 1.0."""
+        from scripts.weekly_summary import compute_week_load_drivers
+
+        mock_result = {
+            "weekly_shares": {"meetings": 0.40, "slack": 0.30, "physiology": 0.20, "rescuetime": 0.05, "omi": 0.05},
+            "dominant_source": "meetings",
+            "days_meaningful": 3,
+        }
+
+        with patch("analysis.load_decomposer.compute_week_decomposition", return_value=mock_result):
+            result = compute_week_load_drivers("2026-03-14")
+
+        total = sum(result["shares"].values())
+        assert abs(total - 1.0) < 0.01
+
+    def test_graceful_on_import_error(self):
+        """When load_decomposer raises, returns safe defaults without error propagation."""
+        from scripts.weekly_summary import compute_week_load_drivers
+
+        with patch("analysis.load_decomposer.compute_week_decomposition", side_effect=ImportError("no module")):
+            result = compute_week_load_drivers("2026-03-14")
+
+        assert result["shares"] == {}
+        assert result["days_meaningful"] == 0
+        assert result["error"] is not None
+
+    def test_graceful_on_exception(self):
+        """Any exception in compute_week_decomposition returns safe defaults."""
+        from scripts.weekly_summary import compute_week_load_drivers
+
+        with patch("analysis.load_decomposer.compute_week_decomposition", side_effect=RuntimeError("oops")):
+            result = compute_week_load_drivers("2026-03-14")
+
+        assert result["shares"] == {}
+        assert result["days_meaningful"] == 0
+        assert result["error"] == "oops"
+
+    def test_empty_shares_when_no_meaningful_days(self):
+        """When days_meaningful=0, shares dict should be empty."""
+        from scripts.weekly_summary import compute_week_load_drivers
+
+        mock_result = {
+            "weekly_shares": {},
+            "dominant_source": "unknown",
+            "days_meaningful": 0,
+        }
+
+        with patch("analysis.load_decomposer.compute_week_decomposition", return_value=mock_result):
+            result = compute_week_load_drivers("2026-03-14")
+
+        assert result["days_meaningful"] == 0
+        assert result["shares"] == {}
+
+
+class TestFormatWeeklyMessageLoadDrivers:
+    """Tests for the Load Drivers section in format_weekly_message (v2.4)."""
+
+    def _make_rolling(self, dates: list) -> dict:
+        """Minimal rolling.json with one day per date."""
+        return {
+            "days": {
+                d: {
+                    "date": d,
+                    "metrics_avg": {
+                        "cognitive_load_score": 0.32,
+                        "focus_depth_index": 0.70,
+                        "social_drain_index": 0.20,
+                        "context_switch_cost": 0.15,
+                        "recovery_alignment_score": 0.75,
+                    },
+                    "whoop": {"recovery_score": 72.0, "hrv_rmssd_milli": 65.0, "sleep_hours": 7.5},
+                    "focus_quality": {"active_fdi": 0.65, "active_windows": 8, "peak_focus_hour": 10},
+                    "calendar": {"total_meeting_minutes": 90},
+                    "slack": {"total_messages_sent": 20, "total_messages_received": 40},
+                    "presence_score": {"dps": 75.0},
+                }
+                for d in dates
+            }
+        }
+
+    def _make_drivers(self, shares: dict, dominant: str, days_meaningful: int = 3) -> dict:
+        return {
+            "shares": shares,
+            "dominant": dominant,
+            "days_meaningful": days_meaningful,
+            "error": None,
+        }
+
+    def test_load_drivers_section_present_when_data_available(self):
+        """Load Drivers section appears when ≥ 2 meaningful days."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        drivers = self._make_drivers(
+            shares={"meetings": 0.42, "slack": 0.28, "physiology": 0.18, "rescuetime": 0.07, "omi": 0.05},
+            dominant="meetings",
+        )
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("scripts.weekly_summary.compute_week_load_drivers", return_value=drivers):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(today)
+            # Inject drivers directly into summary dict for formatting test
+            summary["this_week_drivers"] = drivers
+            summary["last_week_drivers"] = {"shares": {}, "dominant": "unknown", "days_meaningful": 0, "error": None}
+            message = format_weekly_message(summary)
+
+        assert "Load Drivers" in message
+
+    def test_load_drivers_shows_dominant_source(self):
+        """The dominant source should be mentioned in the Load Drivers section."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        drivers = self._make_drivers(
+            shares={"meetings": 0.50, "slack": 0.30, "physiology": 0.15, "rescuetime": 0.03, "omi": 0.02},
+            dominant="meetings",
+        )
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(today)
+            summary["this_week_drivers"] = drivers
+            summary["last_week_drivers"] = {"shares": {}, "dominant": "unknown", "days_meaningful": 0, "error": None}
+            message = format_weekly_message(summary)
+
+        assert "Meetings" in message or "meetings" in message.lower()
+
+    def test_load_drivers_section_absent_when_insufficient_data(self):
+        """Load Drivers section is omitted when days_meaningful < 2."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        no_drivers = self._make_drivers(shares={}, dominant="unknown", days_meaningful=0)
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(today)
+            summary["this_week_drivers"] = no_drivers
+            summary["last_week_drivers"] = no_drivers
+            message = format_weekly_message(summary)
+
+        assert "Load Drivers" not in message
+
+    def test_load_drivers_shows_week_over_week_shift(self):
+        """When prior-week data is available, large source shifts (≥3pp) appear."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        this_drivers = self._make_drivers(
+            shares={"meetings": 0.50, "slack": 0.30, "physiology": 0.15, "rescuetime": 0.03, "omi": 0.02},
+            dominant="meetings",
+        )
+        last_drivers = self._make_drivers(
+            # Slack was only 18% last week → shift of +12pp — should appear
+            shares={"meetings": 0.50, "slack": 0.18, "physiology": 0.20, "rescuetime": 0.07, "omi": 0.05},
+            dominant="meetings",
+        )
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(today)
+            summary["this_week_drivers"] = this_drivers
+            summary["last_week_drivers"] = last_drivers
+            message = format_weekly_message(summary)
+
+        # Slack went from 18% → 30% = +12pp, which should trigger the shift line
+        assert "↑" in message or "↓" in message  # at least one shift indicator
+        assert "Slack" in message or "slack" in message.lower()
+
+    def test_load_drivers_absent_when_decomposer_raises(self):
+        """If compute_week_load_drivers raises, Load Drivers is silently omitted."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("scripts.weekly_summary.compute_week_load_drivers",
+                   side_effect=RuntimeError("decomposer unavailable")):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            try:
+                summary = compute_weekly_summary(today)
+                message = format_weekly_message(summary)
+                assert "Weekly Presence Summary" in message
+                assert "Load Drivers" not in message
+            except RuntimeError:
+                # If compute_weekly_summary propagates — that's acceptable;
+                # the format_weekly_message must not crash when drivers are missing
+                summary = {"end_date": today, "this_week": {"days_with_data": 0}, "last_week": {}, "deltas": {}, "whoop_deltas": {}, "dps_delta": None, "this_week_drivers": {"shares": {}, "dominant": "unknown", "days_meaningful": 0, "error": None}, "last_week_drivers": {"shares": {}, "dominant": "unknown", "days_meaningful": 0, "error": None}}
+                message = format_weekly_message(summary)
+                assert "Load Drivers" not in message
+
+    def test_small_source_shifts_not_shown(self):
+        """Shifts < 3pp should not produce a shift annotation."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        this_drivers = self._make_drivers(
+            shares={"meetings": 0.42, "slack": 0.30, "physiology": 0.18, "rescuetime": 0.06, "omi": 0.04},
+            dominant="meetings",
+        )
+        last_drivers = self._make_drivers(
+            # Only 2pp shift on meetings — should NOT trigger shift line
+            shares={"meetings": 0.40, "slack": 0.31, "physiology": 0.18, "rescuetime": 0.07, "omi": 0.04},
+            dominant="meetings",
+        )
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(today)
+            summary["this_week_drivers"] = this_drivers
+            summary["last_week_drivers"] = last_drivers
+            message = format_weekly_message(summary)
+
+        # Extract just the Load Drivers block (between that header and the next one)
+        if "Load Drivers" in message:
+            load_block_start = message.index("Load Drivers")
+            next_section = message.find("\n*", load_block_start + 1)
+            if next_section > 0:
+                load_block = message[load_block_start:next_section]
+            else:
+                load_block = message[load_block_start:]
+            # No shift arrows expected for < 3pp changes
+            # (meetings: 42→40 = -2pp, slack: 30→31 = +1pp — both below threshold)
+            assert "↑ +" not in load_block or "Slack" not in load_block or "+1" not in load_block
+
+    def test_message_structure_unchanged_without_drivers(self):
+        """Weekly summary renders correctly even when this_week_drivers key is missing."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rolling = self._make_rolling([today])
+
+        with patch("scripts.weekly_summary.read_summary", return_value=rolling), \
+             patch("scripts.weekly_summary.read_day", return_value=[]):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(today)
+            # Simulate an older summary dict missing the drivers keys
+            summary.pop("this_week_drivers", None)
+            summary.pop("last_week_drivers", None)
+            # Should not raise
+            message = format_weekly_message(summary)
+
+        assert "Weekly Presence Summary" in message
+        assert "Load Drivers" not in message

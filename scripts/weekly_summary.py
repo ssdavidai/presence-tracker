@@ -47,6 +47,23 @@ v1.1 — DPS integration:
     - format_weekly_message() surfaces DPS as the headline composite with
       sparkline, week avg, and week-over-week trend direction.
 
+v2.4 — Weekly load source attribution (load drivers):
+    The weekly summary now includes a "Load Drivers" section that shows
+    David *what caused* his cognitive load this week — not just the aggregate
+    CLS number.  This surfaces the load_decomposer's week-aggregation logic
+    (which existed but was never wired into the weekly Slack output).
+
+    What it adds:
+    - Dominant load driver for the week (e.g. "Meetings 43% of CLS")
+    - Per-source breakdown: meetings / slack / physiology / rescuetime / omi
+    - Week-over-week source shifts (e.g. "Slack ↑ 8 pts vs last week")
+    - Only surfaces when ≥ 2 meaningful days in the week window
+
+    This answers the question: "My CLS was 38% this week — but why?"
+    Previously the weekly summary described outcomes (CLS up) without causes.
+    Now David can see if meetings are the culprit vs Slack pressure vs
+    physiological deficit — and take targeted action.
+
 v2.3 — Personal Records milestones + Next-week cognitive pacing:
     Two previously built modules now surface in the Sunday weekly Slack DM:
 
@@ -419,6 +436,12 @@ def compute_weekly_summary(end_date_str: str) -> dict:
     # ── DPS delta (week-over-week composite score) ────────────────────────────
     dps_delta = _delta(this_week.get("dps_avg"), last_week.get("dps_avg"))
 
+    # ── Load source attribution (v2.4) ────────────────────────────────────────
+    # Aggregate per-source CLS shares for both weeks so we can show what drove
+    # the load this week and how it shifted vs the prior week.
+    this_week_drivers = compute_week_load_drivers(end_date_str, days=7)
+    last_week_drivers = compute_week_load_drivers(prior_end, days=7)
+
     return {
         "end_date": end_date_str,
         "this_week": this_week,
@@ -426,7 +449,59 @@ def compute_weekly_summary(end_date_str: str) -> dict:
         "deltas": deltas,
         "whoop_deltas": whoop_deltas,
         "dps_delta": dps_delta,
+        "this_week_drivers": this_week_drivers,
+        "last_week_drivers": last_week_drivers,
     }
+
+
+# ─── Load drivers computation ────────────────────────────────────────────────
+
+_SOURCE_LABELS = {
+    "meetings":    "Meetings",
+    "slack":       "Slack",
+    "physiology":  "Physiology",
+    "rescuetime":  "RescueTime",
+    "omi":         "Conversations",
+}
+
+_SOURCE_EMOJIS = {
+    "meetings":    "📅",
+    "slack":       "💬",
+    "physiology":  "💓",
+    "rescuetime":  "🖥",
+    "omi":         "🎙",
+}
+
+
+def compute_week_load_drivers(end_date_str: str, days: int = 7) -> dict:
+    """
+    Compute the weekly load source attribution using the load_decomposer.
+
+    Aggregates per-source CLS shares across the week and returns:
+      - shares:         dict[source → float]  (avg fraction across days)
+      - dominant:       str  (source with highest share)
+      - days_meaningful: int
+      - error:          str | None  (set when the decomposer is unavailable)
+
+    Returns a dict with shares={} and days_meaningful=0 on error or no data,
+    so callers can always safely test `days_meaningful > 0`.
+    """
+    try:
+        from analysis.load_decomposer import compute_week_decomposition
+        result = compute_week_decomposition(end_date_str=end_date_str, days=days)
+        return {
+            "shares":          result.get("weekly_shares", {}),
+            "dominant":        result.get("dominant_source", "unknown"),
+            "days_meaningful": result.get("days_meaningful", 0),
+            "error":           None,
+        }
+    except Exception as exc:
+        return {
+            "shares":          {},
+            "dominant":        "unknown",
+            "days_meaningful": 0,
+            "error":           str(exc),
+        }
 
 
 # ─── Message formatter ────────────────────────────────────────────────────────
@@ -594,6 +669,50 @@ def format_weekly_message(summary: dict) -> str:
                 sign_s = "+" if sleep_d > 0 else "−"
                 sleep_arrow = f" {arrow_s} {sign_s}{abs(sleep_d):.1f}h"
             lines.append(f"• Sleep:      {sleep_h:.1f}h{sleep_arrow}")
+
+    # ── Load Drivers (source attribution) — v2.4 ─────────────────────────────
+    # Shows what *caused* the week's cognitive load, not just the CLS number.
+    # Sources: meetings, slack, physiology, rescuetime, omi.
+    # Only shown when the decomposer has ≥ 2 meaningful days.
+    this_drivers = summary.get("this_week_drivers", {})
+    last_drivers = summary.get("last_week_drivers", {})
+
+    if this_drivers.get("days_meaningful", 0) >= 2:
+        shares = this_drivers.get("shares", {})
+        dominant = this_drivers.get("dominant", "unknown")
+        last_shares = last_drivers.get("shares", {}) if last_drivers.get("days_meaningful", 0) >= 2 else {}
+
+        # Sort sources by share (descending), skip zero-share sources
+        ranked = sorted(
+            [(src, sh) for src, sh in shares.items() if sh > 0.005],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+        if ranked:
+            lines.append("")
+            dom_emoji = _SOURCE_EMOJIS.get(dominant, "•")
+            dom_label = _SOURCE_LABELS.get(dominant, dominant.capitalize())
+            dom_pct = round(shares.get(dominant, 0) * 100)
+            lines.append(f"*Load Drivers* — {dom_emoji} {dom_label} led ({dom_pct}%)")
+
+            for src, sh in ranked:
+                emoji = _SOURCE_EMOJIS.get(src, "•")
+                label = _SOURCE_LABELS.get(src, src.capitalize())
+                pct = round(sh * 100)
+
+                # Week-over-week shift for this source
+                shift_str = ""
+                if last_shares and src in last_shares:
+                    delta_pct = round(sh * 100) - round(last_shares[src] * 100)
+                    if abs(delta_pct) >= 3:
+                        arrow_s = "↑" if delta_pct > 0 else "↓"
+                        sign_s = "+" if delta_pct > 0 else "−"
+                        shift_str = f"  {arrow_s} {sign_s}{abs(delta_pct)}pp vs last week"
+
+                # Mark dominant source
+                marker = " ←" if src == dominant else ""
+                lines.append(f"  • {emoji} {label}: {pct}%{shift_str}{marker}")
 
     # ── Best / worst days ─────────────────────────────────────────────────────
     cls_ext = tw.get("cls_extremes", {})
