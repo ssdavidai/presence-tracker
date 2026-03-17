@@ -471,6 +471,10 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "cognitive_budget": _compute_cognitive_budget_for_report(date_str, whoop),
         # Cognitive Load Decomposer (v24) — what drove CLS today
         "load_decomposition": _compute_load_decomposition_for_report(date_str),
+        # Flow State Detector (v35) — did David hit flow, and when?
+        "flow_state": _compute_flow_state_for_report(windows),
+        # Load Volatility Index (v32) — was load smooth or chaotic?
+        "load_volatility": _compute_load_volatility_for_report(windows),
     }
 
 
@@ -643,6 +647,76 @@ def _compute_load_decomposition_for_report(date_str: str) -> Optional[dict]:
             "terminal_block": format_decomposition_terminal(decomp),
             # Compact one-liner for embedded use
             "summary_line": format_decomposition_line(decomp),
+        }
+    except Exception:
+        return None
+
+
+def _compute_flow_state_for_report(windows: list[dict]) -> Optional[dict]:
+    """
+    Compute Flow State detection for the terminal report (v38).
+
+    Returns a dict with flow_score, flow_label, sessions, insight, and a
+    pre-rendered terminal block, or None on failure / insufficient data.
+    """
+    try:
+        from analysis.flow_detector import detect_flow_states
+
+        result = detect_flow_states(windows)
+        if not result.is_meaningful:
+            return None
+
+        sessions = []
+        for s in result.flow_sessions:
+            dur_h = s.duration_minutes // 60
+            dur_m = s.duration_minutes % 60
+            dur_str = f"{dur_h}h {dur_m:02d}m" if dur_h > 0 else f"{dur_m}m"
+            sessions.append({
+                "start": s.start_time,
+                "end": s.end_time,
+                "duration_str": dur_str,
+                "duration_minutes": s.duration_minutes,
+                "avg_fdi": s.avg_fdi,
+                "avg_cls": s.avg_cls,
+            })
+
+        return {
+            "flow_score": result.flow_score,
+            "flow_label": result.flow_label,
+            "total_flow_minutes": result.total_flow_minutes,
+            "sessions": sessions,
+            "insight": result.insight,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_load_volatility_for_report(windows: list[dict]) -> Optional[dict]:
+    """
+    Compute Load Volatility Index (LVI) for the terminal report (v38).
+
+    Returns a dict with lvi, label, cls_std, cls_range, insight, and windows_used,
+    or None on failure / insufficient data.
+    """
+    try:
+        from analysis.load_volatility import compute_load_volatility
+
+        lvi = compute_load_volatility(windows)
+        if not lvi.is_meaningful:
+            return None
+
+        return {
+            "lvi": lvi.lvi,
+            "label": lvi.label,
+            "cls_std": lvi.cls_std,
+            "cls_mean": lvi.cls_mean,
+            "cls_min": lvi.cls_min,
+            "cls_max": lvi.cls_max,
+            "cls_range": lvi.cls_range,
+            "windows_used": lvi.windows_used,
+            "insight": lvi.insight,
+            "is_meaningful": True,
         }
     except Exception:
         return None
@@ -911,6 +985,45 @@ def print_full(report: dict, show_windows: bool = False) -> None:
         t_end = f"{f['peak_focus_hour']+1:02d}:00"
         print(f"  Peak focus       {t_start}–{t_end}  ({_pct(f['peak_focus_fdi'])} FDI)")
     print()
+
+    # ── Flow State (v38) ─────────────────────────────────────────────────────
+    _FLOW_EMOJI = {
+        "deep_flow":  "🌊",
+        "in_zone":    "🟢",
+        "brief_flow": "🟡",
+        "none":       "🌑",
+    }
+    _FLOW_DISPLAY = {
+        "deep_flow":  "Deep Flow",
+        "in_zone":    "In the Zone",
+        "brief_flow": "Brief Flow",
+        "none":       "No Flow",
+    }
+    _LVI_EMOJI = {
+        "smooth":   "〰️",
+        "steady":   "📊",
+        "variable": "〽️",
+        "volatile": "⚡",
+    }
+    flow = report.get("flow_state")
+    lvi  = report.get("load_volatility")
+    if flow or lvi:
+        print(_c("  ⑤ᵇ Flow & Load Pattern", BOLD))
+        if flow:
+            fe = _FLOW_EMOJI.get(flow["flow_label"], "🧠")
+            fd = _FLOW_DISPLAY.get(flow["flow_label"], flow["flow_label"])
+            mins = flow["total_flow_minutes"]
+            print(f"  {fe} Flow         {fd}  ({flow['flow_score']:.0%} · {mins} min)")
+            for s in flow.get("sessions", []):
+                print(f"               {s['start']}–{s['end']}  {s['duration_str']:<8}  "
+                      f"FDI {s['avg_fdi']:.0%} · CLS {s['avg_cls']:.0%}")
+            print(_c(f"               {flow['insight']}", DIM))
+        if lvi:
+            le = _LVI_EMOJI.get(lvi["label"], "📊")
+            ld = lvi["label"].capitalize()
+            print(f"  {le} Load pattern  {ld}  (LVI {lvi['lvi']:.2f}  ·  std {lvi['cls_std']:.3f})")
+            print(_c(f"               {lvi['insight']}", DIM))
+        print()
 
     # ── Calendar ─────────────────────────────────────────────────────────────
     cal = report["calendar"]

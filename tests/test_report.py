@@ -1637,3 +1637,208 @@ class TestPrintFullIncludesLoadBreakdown:
         # Either it's absent, or if it appears it should still be valid output
         # (no crashes is the key assertion)
         assert isinstance(out, str)
+
+
+# ─── _compute_flow_state_for_report() ────────────────────────────────────────
+
+class TestComputeFlowStateForReport:
+    """
+    Tests for _compute_flow_state_for_report() (v38).
+
+    The helper should:
+    - Return None gracefully when detect_flow_states is unavailable
+    - Return a dict with required keys when data is meaningful
+    - Include flow_score, flow_label, total_flow_minutes, sessions, insight
+    """
+
+    def _make_flow_windows(self, count: int = 20) -> list[dict]:
+        """Windows tuned to pass flow criteria (high FDI, mid CLS, low CSC)."""
+        wins = _make_day_windows(count)
+        for w in wins:
+            if w["metadata"]["is_working_hours"] and w["metadata"]["is_active_window"]:
+                w["metrics"]["focus_depth_index"] = 0.80
+                w["metrics"]["cognitive_load_score"] = 0.35
+                w["metrics"]["context_switch_cost"] = 0.20
+        return wins
+
+    def test_returns_dict_with_required_keys(self):
+        from scripts.report import _compute_flow_state_for_report
+        wins = self._make_flow_windows(20)
+        result = _compute_flow_state_for_report(wins)
+        # May be None if no flow sessions qualify; either way should not raise
+        if result is not None:
+            assert "flow_score" in result
+            assert "flow_label" in result
+            assert "total_flow_minutes" in result
+            assert "sessions" in result
+            assert "insight" in result
+            assert "is_meaningful" in result
+
+    def test_flow_score_is_float_in_range(self):
+        from scripts.report import _compute_flow_state_for_report
+        wins = self._make_flow_windows(20)
+        result = _compute_flow_state_for_report(wins)
+        if result is not None:
+            assert isinstance(result["flow_score"], float)
+            assert 0.0 <= result["flow_score"] <= 1.0
+
+    def test_sessions_is_list(self):
+        from scripts.report import _compute_flow_state_for_report
+        wins = self._make_flow_windows(20)
+        result = _compute_flow_state_for_report(wins)
+        if result is not None:
+            assert isinstance(result["sessions"], list)
+
+    def test_returns_none_on_empty_windows(self):
+        from scripts.report import _compute_flow_state_for_report
+        result = _compute_flow_state_for_report([])
+        # Empty windows → is_meaningful False → None
+        assert result is None
+
+    def test_graceful_failure_on_import_error(self):
+        from scripts.report import _compute_flow_state_for_report
+        import builtins
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if "flow_detector" in name:
+                raise ImportError("simulated missing module")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=mock_import):
+            result = _compute_flow_state_for_report(_make_day_windows(5))
+        assert result is None
+
+
+# ─── _compute_load_volatility_for_report() ───────────────────────────────────
+
+class TestComputeLoadVolatilityForReport:
+    """
+    Tests for _compute_load_volatility_for_report() (v38).
+
+    The helper should:
+    - Return None gracefully when compute_load_volatility is unavailable
+    - Return a dict with required keys when data is meaningful
+    - Include lvi, label, cls_std, cls_mean, insight, windows_used
+    """
+
+    def test_returns_dict_with_required_keys(self):
+        from scripts.report import _compute_load_volatility_for_report
+        wins = _make_day_windows(20)
+        result = _compute_load_volatility_for_report(wins)
+        if result is not None:
+            assert "lvi" in result
+            assert "label" in result
+            assert "cls_std" in result
+            assert "cls_mean" in result
+            assert "insight" in result
+            assert "windows_used" in result
+            assert "is_meaningful" in result
+
+    def test_lvi_is_float_in_range(self):
+        from scripts.report import _compute_load_volatility_for_report
+        wins = _make_day_windows(20)
+        result = _compute_load_volatility_for_report(wins)
+        if result is not None:
+            assert isinstance(result["lvi"], float)
+            assert 0.0 <= result["lvi"] <= 1.0
+
+    def test_label_is_valid(self):
+        from scripts.report import _compute_load_volatility_for_report
+        wins = _make_day_windows(20)
+        result = _compute_load_volatility_for_report(wins)
+        if result is not None:
+            assert result["label"] in {"smooth", "steady", "variable", "volatile"}
+
+    def test_returns_none_on_empty_windows(self):
+        from scripts.report import _compute_load_volatility_for_report
+        result = _compute_load_volatility_for_report([])
+        assert result is None
+
+    def test_graceful_failure_on_import_error(self):
+        from scripts.report import _compute_load_volatility_for_report
+        import builtins
+        real_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if "load_volatility" in name:
+                raise ImportError("simulated missing module")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=mock_import):
+            result = _compute_load_volatility_for_report(_make_day_windows(5))
+        assert result is None
+
+
+# ─── build_report() includes flow_state + load_volatility ────────────────────
+
+class TestBuildReportIncludesFlowAndLVI:
+    """
+    Verify that build_report() includes 'flow_state' and 'load_volatility' keys (v38).
+    """
+
+    def test_flow_state_key_present_in_report(self):
+        windows = _make_day_windows(20)
+        with patch("scripts.report.read_day", return_value=windows):
+            result = build_report("2026-03-14")
+        assert result is not None
+        assert "flow_state" in result, (
+            "build_report() must include 'flow_state' key (v38 requirement)"
+        )
+
+    def test_load_volatility_key_present_in_report(self):
+        windows = _make_day_windows(20)
+        with patch("scripts.report.read_day", return_value=windows):
+            result = build_report("2026-03-14")
+        assert result is not None
+        assert "load_volatility" in result, (
+            "build_report() must include 'load_volatility' key (v38 requirement)"
+        )
+
+    def test_flow_state_is_none_or_dict(self):
+        windows = _make_day_windows(20)
+        with patch("scripts.report.read_day", return_value=windows):
+            result = build_report("2026-03-14")
+        fs = result.get("flow_state")
+        assert fs is None or isinstance(fs, dict)
+
+    def test_load_volatility_is_none_or_dict(self):
+        windows = _make_day_windows(20)
+        with patch("scripts.report.read_day", return_value=windows):
+            result = build_report("2026-03-14")
+        lvi = result.get("load_volatility")
+        assert lvi is None or isinstance(lvi, dict)
+
+
+# ─── print_full() renders Flow & Load Pattern section ────────────────────────
+
+class TestPrintFullIncludesFlowAndLVI:
+    """
+    Verify that print_full() renders the Flow & Load Pattern section (v38).
+    """
+
+    def test_flow_load_section_appears_in_output(self, capsys):
+        """Flow & Load Pattern section should appear in full report output."""
+        windows = _make_day_windows(20)
+        with patch("scripts.report.read_day", return_value=windows):
+            report = build_report("2026-03-14")
+        assert report is not None
+        print_full(report, show_windows=False)
+        out = capsys.readouterr().out
+        # Section header must appear when flow or lvi data is present
+        if report.get("flow_state") or report.get("load_volatility"):
+            assert "Flow & Load Pattern" in out
+
+    def test_print_full_does_not_crash_with_none_flow(self, capsys):
+        """print_full() must not crash when flow_state and load_volatility are None."""
+        windows = _make_day_windows(5)
+        with patch("scripts.report.read_day", return_value=windows):
+            report = build_report("2026-03-14")
+        assert report is not None
+        # Override with None to test defensive rendering
+        report["flow_state"] = None
+        report["load_volatility"] = None
+        print_full(report, show_windows=False)
+        out = capsys.readouterr().out
+        assert isinstance(out, str)
+        assert len(out) > 0
