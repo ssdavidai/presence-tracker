@@ -12,6 +12,7 @@ Sends David a morning Slack DM at 07:00 Budapest time with:
 - DPS trend — cognitive day quality trajectory over last 7 days (v9.0)
 - Predicted Cognitive Load Forecast — expected CLS based on today's calendar (v14.0)
 - Cognitive Rhythm hint — peak focus hours, morning/afternoon bias, best day-of-week (v18.0)
+- Conversation Intelligence — 7-day conversation load, language, trend (v23.0)
 
 This is the forward-looking complement to the end-of-day digest.
 The digest tells you how the day went; the morning brief tells you
@@ -682,6 +683,14 @@ def compute_morning_brief(
         # Only fetches full section on Mondays to avoid excessive API calls.
         # Returns None on error (graceful degradation).
         "weekly_pacing": _compute_weekly_pacing_for_brief(today_date, today_calendar),
+        # v23.0: Conversation Intelligence — 7-day conversation load, language bias,
+        # and trend direction from Omi transcript history.
+        # Answers: "How much verbal cognitive load have I been carrying lately?"
+        # Surfaces language split (English = higher cognitive cost) and trend direction
+        # so David can spot rising conversation pressure before it affects his focus.
+        # Only shown when ≥ 3 days with Omi data exist in the transcript history.
+        # Returns None when insufficient Omi data or on any error (graceful degradation).
+        "conversation_intelligence": _compute_conversation_for_brief(today_date),
     }
 
 
@@ -1120,6 +1129,51 @@ def _compute_cognitive_rhythm_for_brief(date_str: str) -> Optional[dict]:
         return None
 
 
+def _compute_conversation_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute the Conversation Intelligence summary for the morning brief.
+
+    Analyses the last 7 days of Omi transcript history and returns a compact
+    dict with:
+      - line:              one-liner for the brief (via format_conversation_brief_line)
+      - avg_speech_min:    average speech minutes/day over the window
+      - dominant_language: "en" | "hu" | "mixed" | "unknown"
+      - trend_direction:   "increasing" | "decreasing" | "stable"
+      - days_with_data:    how many of the 7 days had Omi recordings
+      - is_meaningful:     True when ≥ 3 days with Omi data available
+
+    Returns None when:
+      - Fewer than MIN_DAYS_FOR_MEANINGFUL (3) days have Omi data in the window
+      - The conversation_intelligence module raises any exception
+
+    v23.0: Added conversation intelligence to morning brief.
+    """
+    try:
+        from analysis.conversation_intelligence import (
+            analyse_conversation_history,
+            format_conversation_brief_line,
+        )
+
+        ci = analyse_conversation_history(days=7, end_date_str=date_str)
+        if not ci.is_meaningful:
+            return None
+
+        line = format_conversation_brief_line(ci)
+        if not line:
+            return None
+
+        return {
+            "line": line,
+            "avg_speech_min": round(ci.avg_speech_minutes_per_day, 1),
+            "dominant_language": ci.dominant_language,
+            "trend_direction": ci.trend_direction,
+            "days_with_data": ci.days_with_data,
+            "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
 def _format_dps_trend_line(trend: dict, recent_scores: list) -> str:
     """
     Format a compact DPS trend line for the morning brief.
@@ -1451,6 +1505,20 @@ def format_morning_brief_message(brief: dict) -> str:
             if line:
                 lines.append("")
                 lines.append(f"_{line}_")
+
+    # ── Conversation Intelligence (v23.0) ─────────────────────────────────
+    # One-liner showing 7-day conversation load, language bias, and trend.
+    # Example: "🗣 Conversation (5d): 87 min/day · peak 10:00 · English · ↑"
+    # Only shown when ≥ 3 days with Omi data exist in the last 7 days.
+    # Placed at the end of the brief alongside the other compact hints
+    # (rhythm, ml_recovery, sleep_focus) so it doesn't dominate but is
+    # available for planning context.
+    conversation_intelligence = brief.get("conversation_intelligence")
+    if conversation_intelligence and conversation_intelligence.get("is_meaningful"):
+        ci_line = conversation_intelligence.get("line", "")
+        if ci_line:
+            lines.append("")
+            lines.append(f"_{ci_line}_")
 
     return "\n".join(lines)
 

@@ -1185,3 +1185,260 @@ class TestComputeCognitiveRhythmForBrief:
             },
         )
         assert "cognitive_rhythm" in result
+
+
+class TestComputeConversationForBrief:
+    """Tests for _compute_conversation_for_brief (v23.0)."""
+
+    def test_returns_none_when_not_meaningful(self, monkeypatch):
+        """Returns None when ConversationIntelligence.is_meaningful is False."""
+        import analysis.conversation_intelligence as ci_mod
+        from analysis.conversation_intelligence import ConversationIntelligence
+
+        empty_ci = ConversationIntelligence(
+            date_range="2026-03-01 → 2026-03-07",
+            days_requested=7,
+            days_with_data=0,
+            total_speech_minutes=0.0,
+            total_words=0,
+            avg_speech_minutes_per_day=0.0,
+            avg_words_per_day=0.0,
+            avg_cognitive_density=0.0,
+            peak_conversation_hour=9,
+            heavy_days=[],
+            light_days=[],
+            language_split={},
+            dominant_language="unknown",
+            topic_distribution={},
+            dominant_topic="unknown",
+            hourly_profile={},
+            daily_summaries=[],
+            is_meaningful=False,
+            trend_direction="stable",
+            trend_description="No data.",
+            insight_lines=[],
+        )
+        monkeypatch.setattr(ci_mod, "analyse_conversation_history", lambda **kw: empty_ci)
+
+        from analysis.morning_brief import _compute_conversation_for_brief
+        result = _compute_conversation_for_brief("2026-03-07")
+        assert result is None
+
+    def test_returns_dict_when_meaningful(self, monkeypatch):
+        """Returns a dict with expected keys when CI is meaningful."""
+        import analysis.conversation_intelligence as ci_mod
+        from analysis.conversation_intelligence import ConversationIntelligence
+
+        meaningful_ci = ConversationIntelligence(
+            date_range="2026-03-01 → 2026-03-07",
+            days_requested=7,
+            days_with_data=4,
+            total_speech_minutes=280.0,
+            total_words=21000,
+            avg_speech_minutes_per_day=70.0,
+            avg_words_per_day=5250.0,
+            avg_cognitive_density=0.48,
+            peak_conversation_hour=10,
+            heavy_days=["2026-03-05"],
+            light_days=["2026-03-02"],
+            language_split={"en": 6, "hu": 2},
+            dominant_language="en",
+            topic_distribution={"work_technical": 0.60, "personal": 0.40},
+            dominant_topic="work_technical",
+            hourly_profile={10: 3200, 11: 2800, 14: 1500},
+            daily_summaries=[],
+            is_meaningful=True,
+            trend_direction="stable",
+            trend_description="Conversation volume stable.",
+            insight_lines=["📈 Some insight here."],
+        )
+        monkeypatch.setattr(ci_mod, "analyse_conversation_history", lambda **kw: meaningful_ci)
+
+        from analysis.morning_brief import _compute_conversation_for_brief
+        result = _compute_conversation_for_brief("2026-03-07")
+        assert result is not None
+        assert result["is_meaningful"] is True
+        assert "line" in result
+        assert "avg_speech_min" in result
+        assert "dominant_language" in result
+        assert "trend_direction" in result
+        assert "days_with_data" in result
+
+    def test_result_line_is_nonempty(self, monkeypatch):
+        """The 'line' key in the result is a non-empty string."""
+        import analysis.conversation_intelligence as ci_mod
+        from analysis.conversation_intelligence import ConversationIntelligence
+
+        meaningful_ci = ConversationIntelligence(
+            date_range="2026-03-01 → 2026-03-07",
+            days_requested=7,
+            days_with_data=5,
+            total_speech_minutes=350.0,
+            total_words=26250,
+            avg_speech_minutes_per_day=70.0,
+            avg_words_per_day=5250.0,
+            avg_cognitive_density=0.45,
+            peak_conversation_hour=9,
+            heavy_days=[],
+            light_days=[],
+            language_split={"en": 8, "hu": 2},
+            dominant_language="en",
+            topic_distribution={"work_technical": 0.70},
+            dominant_topic="work_technical",
+            hourly_profile={9: 4000, 10: 3200},
+            daily_summaries=[],
+            is_meaningful=True,
+            trend_direction="increasing",
+            trend_description="Conversation volume trending up.",
+            insight_lines=[],
+        )
+        monkeypatch.setattr(ci_mod, "analyse_conversation_history", lambda **kw: meaningful_ci)
+
+        from analysis.morning_brief import _compute_conversation_for_brief
+        result = _compute_conversation_for_brief("2026-03-07")
+        assert result is not None
+        assert len(result["line"]) > 0
+
+    def test_graceful_on_exception(self, monkeypatch):
+        """Returns None when analyse_conversation_history raises any exception."""
+        import analysis.conversation_intelligence as ci_mod
+        monkeypatch.setattr(
+            ci_mod,
+            "analyse_conversation_history",
+            lambda **kw: (_ for _ in ()).throw(RuntimeError("transcript dir missing")),
+        )
+
+        from analysis.morning_brief import _compute_conversation_for_brief
+        result = _compute_conversation_for_brief("2026-03-07")
+        assert result is None
+
+    def test_result_dominant_language_matches_ci(self, monkeypatch):
+        """dominant_language in result matches the ConversationIntelligence object."""
+        import analysis.conversation_intelligence as ci_mod
+        from analysis.conversation_intelligence import ConversationIntelligence
+
+        ci = ConversationIntelligence(
+            date_range="2026-03-01 → 2026-03-07",
+            days_requested=7,
+            days_with_data=3,
+            total_speech_minutes=120.0,
+            total_words=9000,
+            avg_speech_minutes_per_day=40.0,
+            avg_words_per_day=3000.0,
+            avg_cognitive_density=0.35,
+            peak_conversation_hour=15,
+            heavy_days=[],
+            light_days=[],
+            language_split={"hu": 5, "en": 1},
+            dominant_language="hu",
+            topic_distribution={"personal": 0.80},
+            dominant_topic="personal",
+            hourly_profile={15: 2000},
+            daily_summaries=[],
+            is_meaningful=True,
+            trend_direction="decreasing",
+            trend_description="Conversation volume trending down.",
+            insight_lines=[],
+        )
+        monkeypatch.setattr(ci_mod, "analyse_conversation_history", lambda **kw: ci)
+
+        from analysis.morning_brief import _compute_conversation_for_brief
+        result = _compute_conversation_for_brief("2026-03-07")
+        assert result is not None
+        assert result["dominant_language"] == "hu"
+        assert result["trend_direction"] == "decreasing"
+        assert result["days_with_data"] == 3
+
+
+class TestConversationIntelligenceInBriefMessage:
+    """Tests for conversation intelligence rendering in format_morning_brief_message."""
+
+    def _make_brief(self, ci_data=None):
+        """Build a minimal valid brief dict with optional conversation_intelligence."""
+        return {
+            "date": "2026-03-14",
+            "whoop": {
+                "recovery_score": 85.0,
+                "hrv_rmssd_milli": 72.0,
+                "sleep_hours": 8.0,
+                "sleep_performance": 88.0,
+                "resting_heart_rate": 54.0,
+            },
+            "readiness": {"tier": "peak", "label": "Peak", "recommendation": "Go hard."},
+            "yesterday": {},
+            "hrv_baseline": 70.0,
+            "trend_context": {},
+            "cognitive_debt": None,
+            "cognitive_budget": None,
+            "dps_trend": None,
+            "load_forecast": None,
+            "tomorrow_focus_plan": None,
+            "today_calendar": None,
+            "cognitive_rhythm": None,
+            "conversation_intelligence": ci_data,
+        }
+
+    def test_message_contains_conversation_line_when_meaningful(self):
+        """format_morning_brief_message includes CI line when is_meaningful=True."""
+        brief = self._make_brief({
+            "line": "🗣 Conversation (4d): 72 min/day · peak 10:00 · English · →",
+            "avg_speech_min": 72.0,
+            "dominant_language": "en",
+            "trend_direction": "stable",
+            "days_with_data": 4,
+            "is_meaningful": True,
+        })
+        from analysis.morning_brief import format_morning_brief_message
+        msg = format_morning_brief_message(brief)
+        assert "Conversation" in msg
+        assert "72 min/day" in msg
+
+    def test_message_omits_conversation_when_none(self):
+        """format_morning_brief_message omits CI section when conversation_intelligence is None."""
+        brief = self._make_brief(None)
+        from analysis.morning_brief import format_morning_brief_message
+        msg = format_morning_brief_message(brief)
+        # There might be "Conversation" elsewhere; check the specific line format
+        assert "🗣 Conversation" not in msg
+
+    def test_message_omits_conversation_when_not_meaningful(self):
+        """format_morning_brief_message omits CI section when is_meaningful=False."""
+        brief = self._make_brief({
+            "line": "",
+            "avg_speech_min": 0.0,
+            "dominant_language": "unknown",
+            "trend_direction": "stable",
+            "days_with_data": 0,
+            "is_meaningful": False,
+        })
+        from analysis.morning_brief import format_morning_brief_message
+        msg = format_morning_brief_message(brief)
+        assert "🗣 Conversation" not in msg
+
+    def test_compute_morning_brief_includes_conversation_key(self, monkeypatch):
+        """compute_morning_brief dict always includes a 'conversation_intelligence' key."""
+        import analysis.morning_brief as mb_mod
+        monkeypatch.setattr(mb_mod, "_compute_cdi_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_cdi_forecast_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_dps_trend_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_focus_plan_for_brief", lambda *a, **kw: None)
+        monkeypatch.setattr(mb_mod, "_compute_load_forecast_for_brief", lambda *a, **kw: None)
+        monkeypatch.setattr(mb_mod, "_compute_cognitive_budget_for_brief", lambda *a, **kw: None)
+        monkeypatch.setattr(mb_mod, "_compute_cognitive_rhythm_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_conversation_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_ml_recovery_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_sleep_focus_for_brief", lambda *a: None)
+        monkeypatch.setattr(mb_mod, "_compute_weekly_pacing_for_brief", lambda *a, **kw: None)
+
+        from analysis.morning_brief import compute_morning_brief
+        result = compute_morning_brief(
+            today_date="2026-03-14",
+            whoop_data={
+                "recovery_score": 85.0,
+                "hrv_rmssd_milli": 72.0,
+                "sleep_hours": 8.0,
+                "sleep_performance": 88.0,
+                "resting_heart_rate": 54.0,
+            },
+        )
+        assert "conversation_intelligence" in result
