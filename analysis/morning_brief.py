@@ -620,6 +620,11 @@ def compute_morning_brief(
         # Computed here so the morning brief can warn David before the day starts.
         # Returns None when < 3 days of history exist (graceful degradation).
         "cognitive_debt": _compute_cdi_for_brief(today_date),
+        # CDI Forecast — where is cognitive debt heading over the next 5 days?
+        # Answers: "At this pace, when will I hit fatigued / recover to balanced?"
+        # Positioned alongside CDI so the two signals read together.
+        # Returns None when < MIN_DAYS_FOR_FORECAST (3) days of history exist.
+        "cdi_forecast": _compute_cdi_forecast_for_brief(today_date),
         # v9.0: Daily Presence Score trend — is cognitive day quality improving or declining?
         # CDI tracks load vs. recovery balance; DPS trend tracks *quality* of days.
         # A declining DPS trend (e.g. 78 → 65 → 52) means David's days are getting
@@ -697,6 +702,30 @@ def _compute_cdi_for_brief(date_str: str) -> Optional[dict]:
             "days_in_deficit": debt.days_in_deficit,
             "days_used": debt.days_used,
             "line": format_cdi_line(debt),
+        }
+    except Exception:
+        return None
+
+
+def _compute_cdi_forecast_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute CDI trajectory forecast for the morning brief.
+
+    Returns a dict with 'is_meaningful' and 'line' when the forecast is
+    meaningful, or None on any error.  Never raises.
+    """
+    try:
+        from analysis.cdi_forecast import compute_cdi_forecast, format_cdi_forecast_line
+        forecast = compute_cdi_forecast(date_str)
+        if not forecast.is_meaningful:
+            return None
+        return {
+            "is_meaningful": True,
+            "trend_direction": forecast.trend_direction,
+            "days_to_fatigued": forecast.days_to_fatigued,
+            "days_to_recovery": forecast.days_to_recovery,
+            "headline": forecast.headline,
+            "line": format_cdi_forecast_line(forecast),
         }
     except Exception:
         return None
@@ -1264,6 +1293,18 @@ def format_morning_brief_message(brief: dict) -> str:
         if cdi_line:
             lines.append("")
             lines.append(f"_{cdi_line}_")
+
+    # ── CDI Trajectory Forecast (cdi_forecast.py) ────────────────────────
+    # Where is David's cognitive debt heading over the next 5 days?
+    # Positioned directly after the CDI line so the two signals read together:
+    # "Here's your debt level — here's where it's going."
+    # Only shown when is_meaningful (≥ 3 days of history).
+    # Example: "🟠 CDI trajectory: worsening ↑ — fatigued in ~3d [▁▂▃▄▅]"
+    cdi_forecast_data = brief.get("cdi_forecast")
+    if cdi_forecast_data and cdi_forecast_data.get("is_meaningful"):
+        forecast_line = cdi_forecast_data.get("line", "")
+        if forecast_line:
+            lines.append(f"_{forecast_line}_")
 
     # ── Daily Cognitive Budget (v16.0) ────────────────────────────────────
     # Concrete quality cognitive hours available today.

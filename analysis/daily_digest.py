@@ -619,6 +619,32 @@ def compute_trend_context(today_date: str, lookback_days: int = 7) -> dict:
     }
 
 
+# ─── CDI Forecast helper ─────────────────────────────────────────────────────
+
+def _compute_cdi_forecast_for_digest(date_str: str) -> Optional[dict]:
+    """
+    Compute CDI trajectory forecast for the nightly digest.
+
+    Returns a dict with 'is_meaningful' and 'line', or None on error.
+    Never raises — non-critical enhancement.
+    """
+    try:
+        from analysis.cdi_forecast import compute_cdi_forecast, format_cdi_forecast_line
+        forecast = compute_cdi_forecast(date_str)
+        if not forecast.is_meaningful:
+            return None
+        return {
+            "is_meaningful": True,
+            "trend_direction": forecast.trend_direction,
+            "days_to_fatigued": forecast.days_to_fatigued,
+            "days_to_recovery": forecast.days_to_recovery,
+            "headline": forecast.headline,
+            "line": format_cdi_forecast_line(forecast),
+        }
+    except Exception:
+        return None
+
+
 # ─── DPS helper ───────────────────────────────────────────────────────────────
 
 def _compute_dps_for_digest(windows: list[dict]) -> Optional[dict]:
@@ -1387,6 +1413,9 @@ def compute_digest(windows: list[dict]) -> dict:
         "peak_focus_fdi": peak_focus_fdi,
         # v1.7: Cognitive Debt Index (None when < 3 days of history)
         "cognitive_debt": cognitive_debt,
+        # CDI Trajectory Forecast — where is debt heading over the next 5 days?
+        # (None when < 3 days of history or forecast unavailable)
+        "cdi_forecast": _compute_cdi_forecast_for_digest(date_str),
         # v1.8: Daily Presence Score — single 0–100 composite score
         # (None when insufficient working-hour windows)
         "presence_score": _compute_dps_for_digest(windows),
@@ -1849,6 +1878,16 @@ def format_digest_message(digest: dict) -> str:
         if cdi_line:
             lines.append("")
             lines.append(f"_{cdi_line}_")
+
+    # ── CDI Trajectory Forecast ───────────────────────────────────────────
+    # Where is cognitive debt heading over the next 5 days?
+    # Positioned right after CDI so the two signals read together at night.
+    # Example: "🟠 CDI trajectory: worsening ↑ — fatigued in ~3d [▁▂▃▄▅]"
+    cdi_forecast = digest.get("cdi_forecast")
+    if cdi_forecast and cdi_forecast.get("is_meaningful"):
+        forecast_line = cdi_forecast.get("line", "")
+        if forecast_line:
+            lines.append(f"_{forecast_line}_")
 
     # ── ML Model Insights (v2.2) ─────────────────────────────────────────
     # Surface ML-derived signals: recovery prediction and behavioral anomalies.
