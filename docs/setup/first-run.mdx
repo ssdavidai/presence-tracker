@@ -1,0 +1,99 @@
+---
+title: "First Run"
+description: "Step by step — from zero to your first presence report."
+---
+
+# First Run
+
+---
+
+## Step 1: Verify prerequisites
+
+```bash
+python3 scripts/status.py
+```
+
+Fix any red ✗ items before proceeding.
+
+---
+
+## Step 2: Ingest today
+
+```bash
+python3 scripts/run_daily.py
+```
+
+Expected output:
+```
+Ingesting 2026-03-14...
+  WHOOP:       recovery=86%  hrv=79ms  sleep=6.7h ✓
+  Calendar:    3 events ✓
+  Slack:       247 messages across 12 windows ✓
+  RescueTime:  8.4h active  app_switches=312 ✓
+  Omi:         4 transcripts  1,847 words ✓
+Writing data/chunks/2026-03-14.jsonl (96 windows)...
+Generating dashboard...
+Done.
+```
+
+---
+
+## Step 3: View your first report
+
+```bash
+python3 scripts/report.py --date 2026-03-14
+```
+
+---
+
+## Step 4: Backfill history
+
+```bash
+python3 scripts/backfill.py --days 30
+```
+
+This gives the anomaly detector and CDI calculation meaningful baselines.
+
+---
+
+## Step 5: Register Temporal schedules
+
+```bash
+python3 temporal/schedules.py
+```
+
+From this point on, ingestion and delivery happen automatically:
+- 07:00 — morning brief
+- 13:00 Mon–Fri — midday check-in
+- 18:00 — evening wind-down
+- 23:45 — nightly ingestion + digest
+- Sunday 21:00 — weekly report
+- 1st of month 02:00 — ML retrain
+
+---
+
+## Step 6: Run a manual weekly report (optional)
+
+```bash
+python3 scripts/run_analysis.py
+```
+
+This sends both parts of the weekly report to your Slack DM immediately.
+
+---
+
+## What to Expect
+
+After a week of data:
+- Morning brief tiers become meaningful
+- CDI starts showing real trends
+- Anomaly alerts calibrate to your baseline
+
+After 30 days:
+- ML models train with useful data
+- Focus cluster labels become reliable
+- Weekly Intuition reports identify real patterns
+
+After 60 days:
+- Anomaly detection is statistically sound
+- Recovery predictor achieves meaningful accuracy

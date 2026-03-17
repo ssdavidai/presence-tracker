@@ -1,0 +1,120 @@
+---
+title: "Temporal Workflows"
+description: "The four scheduled workflows that run the presence tracker automatically."
+---
+
+# Temporal Workflows
+
+Presence Tracker uses [Temporal](https://temporal.io) for all scheduled automation. This guarantees completion — workflows survive crashes, reboots, and transient API failures.
+
+Workflow code lives in `temporal/`.
+
+---
+
+## Worker Setup
+
+The presence tracker registers its workflows into **Alfred's main Temporal worker** (`~/clawd/temporal-workflows/worker.py`). It does not run a separate worker process.
+
+**Task queue:** `alfred-tasks`
+
+---
+
+## Schedules
+
+| Workflow | Schedule | What it does |
+|----------|----------|-------------|
+| `MorningBriefWorkflow` | 06:00 UTC (07:00 Budapest) daily | Reads yesterday's WHOOP data, sends readiness brief with CDI and 7-day trends |
+| `MidDayCheckInWorkflow` | 12:00 UTC (13:00 Budapest) Mon–Fri | Morning load pulse + afternoon recommendation (skips quiet mornings) |
+| `EveningWindDownWorkflow` | 17:00 UTC (18:00 Budapest) daily | Day-type classification + wind-down recommendation |
+| `DailyIngestionWorkflow` | 22:45 UTC (23:45 Budapest) daily | Ingests all sources → JSONL, generates dashboard, runs anomaly alerts, sends nightly digest |
+| `WeeklyAnalysisWorkflow` | 20:00 UTC (21:00 Budapest) Sunday | Deterministic weekly summary + LLM Intuition report |
+| `MonthlyMLRetrainWorkflow` | 01:00 UTC (02:00 Budapest) 1st of month | Retrains Isolation Forest, Random Forest, and KMeans |
+
+---
+
+## temporal/workflows.py
+
+Defines all workflow classes. Each is a thin orchestrator that calls activities.
+
+```python
+@workflow.defn
+class DailyIngestionWorkflow:
+    @workflow.run
+    async def run(self, date: str | None = None) -> None:
+        # 1. Ingest all sources for date
+        await workflow.execute_activity(ingest_day, ...)
+        # 2. Generate dashboard
+        await workflow.execute_activity(generate_dashboard, ...)
+        # 3. Run anomaly checks
+        await workflow.execute_activity(check_anomalies, ...)
+        # 4. Send nightly digest
+        await workflow.execute_activity(send_digest, ...)
+```
+
+---
+
+## temporal/activities.py
+
+Wraps each Python function as a Temporal activity. Activities have:
+
+- `start_to_close_timeout` — max time for a single attempt
+- `retry_policy` — automatic retries on failure
+
+---
+
+## temporal/schedules.py
+
+Registers (or updates) all schedules in the Temporal server. Safe to re-run — existing schedules are updated, not duplicated.
+
+```bash
+# Re-register all schedules
+source ~/clawd/temporal-workflows/.venv/bin/activate
+python3 temporal/schedules.py
+```
+
+---
+
+## Pausing and Resuming
+
+To pause a schedule without deleting it:
+
+```bash
+source ~/clawd/temporal-workflows/.venv/bin/activate
+python3 -c "
+import asyncio
+from temporalio.client import Client
+
+async def main():
+    client = await Client.connect('localhost:7233')
+    handle = client.get_schedule_handle('presence-daily-ingestion')
+    await handle.pause(note='Paused for maintenance')
+    print('Paused.')
+
+asyncio.run(main())
+"
+```
+
+To resume:
+
+```python
+await handle.unpause()
+```
+
+View all schedules in the Temporal UI at `http://localhost:8233`.
+
+---
+
+## Manual Trigger
+
+Any workflow can be triggered manually without waiting for its schedule:
+
+```bash
+# Trigger daily ingestion for today
+python3 scripts/run_daily.py
+
+# Trigger morning brief manually
+python3 scripts/run_morning.py
+
+# Trigger weekly analysis manually
+python3 scripts/run_analysis.py
+```

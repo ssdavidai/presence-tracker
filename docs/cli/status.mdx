@@ -1,0 +1,69 @@
+---
+title: "status.py"
+description: "7-section system health check — verify all integrations are working."
+---
+
+# status.py
+
+`scripts/status.py` — system health check. Verifies all integrations, checks data freshness, and reports any problems.
+
+---
+
+## Usage
+
+```bash
+python3 scripts/status.py
+```
+
+---
+
+## Output
+
+```
+══════════════════════════════════════════
+  Presence Tracker — System Status
+══════════════════════════════════════════
+
+[1/7] WHOOP
+  ✓ Auth valid (expires 2026-04-14)
+  ✓ Latest cycle: 2026-03-14 (recovery: 86%)
+
+[2/7] Google Calendar
+  ✓ gog CLI: authenticated
+  ✓ Calendar accessible: david@szabostuban.com
+
+[3/7] Slack
+  ✓ Connected
+  ✓ DM channel reachable
+
+[4/7] RescueTime
+  ✓ API key present
+  ✓ Latest data: 2026-03-14
+
+[5/7] Omi
+  ✓ ~/omi/ exists
+  ✓ Latest transcript: 2026-03-14 (3 files)
+
+[6/7] Data
+  ✓ Latest JSONL: 2026-03-14 (96 windows)
+  ✓ Days with data: 30
+  ✓ Models: all 3 present (last trained: 2026-03-01)
+
+[7/7] Temporal
+  ✓ Server reachable (localhost:7233)
+  ✓ Schedules: presence-daily-ingestion (next: 2026-03-15 22:45 UTC)
+
+══════════════════════════════════════════
+Status: ALL SYSTEMS OPERATIONAL
+══════════════════════════════════════════
+```
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | All systems OK |
+| 1 | One or more systems degraded (partial data possible) |
+| 2 | Critical failure (ingestion will likely fail) |

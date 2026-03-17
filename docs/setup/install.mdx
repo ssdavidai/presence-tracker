@@ -1,0 +1,63 @@
+---
+title: "Installation"
+description: "Install dependencies and configure Presence Tracker."
+---
+
+# Installation
+
+---
+
+## 1. Clone
+
+```bash
+git clone https://github.com/ssdavidai/presence-tracker.git
+cd presence-tracker
+```
+
+## 2. Install dependencies
+
+Presence Tracker uses Alfred's existing Python venv:
+
+```bash
+source ~/clawd/temporal-workflows/.venv/bin/activate
+pip install -r requirements.txt
+```
+
+## 3. Configure RescueTime
+
+```bash
+export RESCUETIME_API_KEY=your_key_here
+# Or add to ~/.clawdbot/clawdbot.json
+```
+
+## 4. Verify setup
+
+```bash
+python3 scripts/status.py
+```
+
+All 7 sections should report ✓. If WHOOP tokens are expired, re-authenticate via the WHOOP skill.
+
+## 5. Run first ingestion
+
+```bash
+python3 scripts/run_daily.py
+```
+
+This fetches today's data from all sources and writes `data/chunks/YYYY-MM-DD.jsonl`.
+
+## 6. Backfill history (optional but recommended)
+
+```bash
+python3 scripts/backfill.py --days 30
+```
+
+Backfilling 30+ days enables meaningful anomaly detection and CDI trends.
+
+## 7. Register Temporal schedules
+
+```bash
+python3 temporal/schedules.py
+```
+
+This registers all six scheduled workflows in Temporal. Safe to re-run — updates existing schedules.

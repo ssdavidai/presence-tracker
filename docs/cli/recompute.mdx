@@ -1,0 +1,57 @@
+---
+title: "recompute_metrics.py"
+description: "Recompute metrics on existing JSONL without re-fetching API data."
+---
+
+# recompute_metrics.py
+
+`scripts/recompute_metrics.py` — recompute metrics on existing JSONL files after formula changes.
+
+This is the safe way to apply updated metric formulae to historical data without hitting the APIs again.
+
+---
+
+## Usage
+
+```bash
+# Recompute all historical data
+python3 scripts/recompute_metrics.py --all
+
+# Recompute a specific date
+python3 scripts/recompute_metrics.py --date 2026-03-14
+
+# Recompute a date range
+python3 scripts/recompute_metrics.py --start 2026-02-01 --end 2026-03-14
+```
+
+---
+
+## What It Does
+
+1. Reads the existing JSONL file for each target date
+2. Preserves all raw signal data (whoop, calendar, slack, rescuetime, omi)
+3. Re-runs `engine/metrics.py` on each window
+4. Writes the updated metrics back to the same file (overwrite)
+
+---
+
+## When to Use
+
+- After changing a metric formula in `engine/metrics.py`
+- After fixing a bug in a metric calculation
+- After changing configuration values that affect formulas (e.g. `MAX_APP_SWITCHES_PER_WINDOW`)
+
+---
+
+## Output
+
+```
+Recomputing metrics for 30 days...
+
+2026-02-13  ✓  96 windows updated
+2026-02-14  ✓  96 windows updated
+...
+2026-03-14  ✓  96 windows updated
+
+Done. 30 files updated.
+```

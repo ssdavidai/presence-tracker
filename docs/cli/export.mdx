@@ -1,0 +1,51 @@
+---
+title: "export.py"
+description: "Export presence data as CSV or JSON for external analysis."
+---
+
+# export.py
+
+`scripts/export.py` — export data from the JSONL store to CSV or JSON.
+
+---
+
+## Usage
+
+```bash
+# All data as CSV
+python3 scripts/export.py --format csv --out ~/presence-export.csv
+
+# Last 30 days as JSON
+python3 scripts/export.py --format json --days 30
+
+# Date range as CSV
+python3 scripts/export.py --format csv --start 2026-02-01 --end 2026-03-14 --out ~/q1.csv
+
+# Daily summaries only (not per-window)
+python3 scripts/export.py --format csv --daily-summary --out ~/daily-summary.csv
+```
+
+---
+
+## CSV Format
+
+Per-window export includes all raw signals and metrics as flat columns:
+
+```
+date,window_index,window_start,recovery_score,hrv,cls,fdi,sdi,csc,ras,dps
+2026-03-14,36,2026-03-14T09:00:00,85.0,72.4,0.72,0.31,0.58,0.45,0.88,81
+```
+
+Daily summary mode outputs one row per day:
+```
+date,recovery_score,avg_cls,avg_fdi,avg_sdi,avg_ras,dps,cdi
+2026-03-14,86,0.07,0.94,0.01,0.98,81,92
+```
+
+---
+
+## Use Cases
+
+- Import into Google Sheets / Excel for custom visualisation
+- Feed into external ML tools
+- Share a date range with a coach or doctor

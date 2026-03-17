@@ -1,0 +1,145 @@
+---
+title: "Technical Specification"
+description: "Full mathematical specification of all metrics and composite scores."
+---
+
+# Technical Specification
+
+This page documents the exact formulae used for each metric. These match the implementation in `engine/metrics.py`.
+
+<Info>
+  For high-level explanations with interpretation guidance, see [Metrics Reference](/overview/metrics).
+</Info>
+
+---
+
+## Normalization Helpers
+
+All input signals are clamped to `[0, 1]` before use:
+
+```python
+def clamp(value, min_val=0.0, max_val=1.0):
+    return max(min_val, min(max_val, value))
+```
+
+Constants (from `config.py`):
+- `MAX_APP_SWITCHES_PER_WINDOW = 8`
+- `MAX_SLACK_MESSAGES_PER_WINDOW = 40`
+
+---
+
+## CLS — Cognitive Load Score
+
+```python
+meeting_load = min(1.0, meetings_count / 3)
+attendee_load = min(1.0, meeting_attendees / 8)
+slack_load = min(1.0, total_messages / MAX_SLACK_MESSAGES_PER_WINDOW)
+switch_load = min(1.0, app_switches / MAX_APP_SWITCHES_PER_WINDOW)
+
+cls = (
+    0.35 * meeting_load
+    + 0.20 * attendee_load
+    + 0.25 * slack_load
+    + 0.20 * switch_load
+)
+```
+
+---
+
+## FDI — Focus Depth Index
+
+```python
+rt_focus_ratio = focus_seconds / max(active_seconds, 1)
+switch_penalty = min(1.0, app_switches / MAX_APP_SWITCHES_PER_WINDOW)
+slack_penalty = min(1.0, messages_sent / 20)
+meeting_penalty = 1.0 if in_meeting else 0.0
+
+raw_fdi = rt_focus_ratio * (1 - 0.5 * switch_penalty)
+fdi = max(0.0, raw_fdi - 0.2 * slack_penalty - 0.3 * meeting_penalty)
+fdi = clamp(fdi)
+```
+
+---
+
+## SDI — Social Drain Index
+
+```python
+meeting_drain = min(1.0, (meeting_attendees / 8) * meetings_count)
+slack_drain = min(1.0, messages_sent / 20)
+omi_drain = min(1.0, word_count / 500)
+
+sdi = (
+    0.50 * meeting_drain
+    + 0.30 * slack_drain
+    + 0.20 * omi_drain
+)
+```
+
+---
+
+## CSC — Context Switch Cost
+
+```python
+app_switch_cost = min(1.0, app_switches / MAX_APP_SWITCHES_PER_WINDOW)
+channel_cost = min(1.0, channels_active / 5)
+# Back-to-back meeting penalty (2+ meetings in window)
+meeting_cost = 1.0 if meetings_count >= 2 else 0.0
+
+csc = (
+    0.50 * app_switch_cost
+    + 0.30 * channel_cost
+    + 0.20 * meeting_cost
+)
+```
+
+---
+
+## RAS — Recovery Alignment Score
+
+```python
+# Compute expected load tolerance from recovery score
+recovery_normalized = clamp(recovery_score / 100)
+
+# Smooth alignment using tanh
+load_tolerance = 0.3 + 0.7 * recovery_normalized
+delta = load_tolerance - cls  # positive = load below tolerance
+
+# Smooth mapping: delta=0 → RAS=0.5, delta=+0.5 → RAS≈0.9
+import math
+ras = 0.5 + 0.5 * math.tanh(4 * delta)
+ras = clamp(ras)
+```
+
+---
+
+## DPS — Daily Presence Score
+
+```python
+# Compute per active window, then average
+def window_dps(w):
+    m = w["metrics"]
+    return (
+        0.30 * m["focus_depth_index"]
+        + 0.25 * m["recovery_alignment_score"]
+        + 0.20 * (1 - m["cognitive_load_score"])
+        + 0.15 * (1 - m["context_switch_cost"])
+        + 0.10 * (1 - m["social_drain_index"])
+    )
+
+active = [w for w in windows if w["metadata"]["is_active_window"]]
+dps = sum(window_dps(w) for w in active) / len(active) * 100
+```
+
+---
+
+## CDI — Cognitive Debt Index
+
+```python
+# Per-day debt score
+def day_debt(daily_avg_cls, daily_avg_ras):
+    return daily_avg_ras * (1 - daily_avg_cls)
+
+# Rolling 7-day CDI
+debt_scores = [day_debt(cls, ras) for cls, ras in last_7_days]
+cdi = sum(debt_scores) / len(debt_scores) * 100
+```

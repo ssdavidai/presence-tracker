@@ -1,0 +1,49 @@
+---
+title: "Anomaly Alerts"
+description: "On-demand Slack alerts when cognitive thresholds are breached during nightly ingestion."
+---
+
+# Anomaly Alerts
+
+Anomaly alerts fire automatically during nightly ingestion when metric thresholds are breached. They are sent as immediate Slack DMs — separate from the scheduled digest.
+
+---
+
+## Thresholds
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| **CLS Spike** | CLS >2 standard deviations above your 7-day baseline | 🔴 High |
+| **FDI Collapse** | FDI dropped >30% vs 7-day average | 🟡 Medium |
+| **Recovery Misalignment** | RAS <0.4 for 3+ consecutive days | 🔴 High |
+| **ML Anomaly** | Isolation Forest flags the day as anomalous | 🟡 Medium |
+
+Thresholds use your **personal baseline** — not fixed numbers. Someone with consistently high CLS has a different normal than someone with consistently low CLS.
+
+---
+
+## Alert Format
+
+```
+⚠️ Presence Alert — Thursday 14 Mar
+
+CLS SPIKE detected
+Today: 0.89 (your 7-day avg: 0.31, threshold: 0.65)
+
+Likely cause: 6 hours of meetings + 94 Slack messages
+RAS: 0.41 — load is misaligned with recovery (WHOOP: 52%)
+
+Recommendation: Tomorrow, protect at least 2 uninterrupted hours.
+```
+
+---
+
+## Suppression
+
+To avoid alert fatigue, a given alert type won't re-fire for the same type within 48 hours unless the threshold is exceeded by a larger margin.
+
+---
+
+## Implementation
+
+`analysis/anomaly_alerts.py` — called from `DailyIngestionWorkflow` after metrics are written.

@@ -1,0 +1,99 @@
+---
+title: "Temporal Setup"
+description: "Running the Temporal server and registering presence tracker schedules."
+---
+
+# Temporal Setup
+
+Presence Tracker's scheduled automation runs via Temporal. The Temporal server runs in Docker; the worker is part of Alfred's main Temporal worker.
+
+---
+
+## Start Temporal
+
+```bash
+cd ~/services/temporal
+docker compose up -d
+```
+
+Temporal UI: [http://localhost:8233](http://localhost:8233)
+
+---
+
+## Alfred Worker
+
+Presence Tracker's workflows are registered in Alfred's main worker at `~/clawd/temporal-workflows/worker.py`.
+
+Restart the worker after adding or modifying workflow classes:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.alfred.temporal-worker
+```
+
+Check worker status:
+
+```bash
+launchctl list | grep temporal
+```
+
+---
+
+## Register Schedules
+
+```bash
+source ~/clawd/temporal-workflows/.venv/bin/activate
+python3 temporal/schedules.py
+```
+
+This creates (or updates) all six presence tracker schedules in Temporal.
+
+---
+
+## View Schedules
+
+Open the Temporal UI at [http://localhost:8233](http://localhost:8233) → **Schedules**.
+
+You should see:
+- `presence-morning-brief`
+- `presence-midday-checkin`
+- `presence-evening-winddown`
+- `presence-daily-ingestion`
+- `presence-weekly-analysis`
+- `presence-monthly-ml-retrain`
+
+---
+
+## Pause All Schedules
+
+```python
+import asyncio
+from temporalio.client import Client
+
+async def pause_all():
+    client = await Client.connect('localhost:7233')
+    ids = [
+        'presence-morning-brief', 'presence-midday-checkin',
+        'presence-evening-winddown', 'presence-daily-ingestion',
+        'presence-weekly-analysis', 'presence-monthly-ml-retrain',
+    ]
+    for sid in ids:
+        handle = client.get_schedule_handle(sid)
+        await handle.pause(note='Maintenance pause')
+        print(f'Paused: {sid}')
+
+asyncio.run(pause_all())
+```
+
+---
+
+## Resume All Schedules
+
+```python
+async def resume_all():
+    client = await Client.connect('localhost:7233')
+    ids = [...]  # same list as above
+    for sid in ids:
+        handle = client.get_schedule_handle(sid)
+        await handle.unpause()
+        print(f'Resumed: {sid}')
+```

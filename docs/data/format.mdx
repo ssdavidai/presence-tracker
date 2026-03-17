@@ -1,0 +1,144 @@
+---
+title: "Data Format"
+description: "The JSONL schema for daily presence data — one line per 15-minute window."
+---
+
+# Data Format
+
+Each day's data is stored as a JSONL file at `data/chunks/YYYY-MM-DD.jsonl`. One JSON line per 15-minute window — 96 lines per complete day.
+
+---
+
+## Full Window Schema
+
+```json
+{
+  "window_id": "2026-03-14T09:00:00",
+  "date": "2026-03-14",
+  "window_start": "2026-03-14T09:00:00+01:00",
+  "window_end":   "2026-03-14T09:15:00+01:00",
+  "window_index": 36,
+  "calendar": {
+    "in_meeting": true,
+    "meeting_title": "Product Sync",
+    "meeting_attendees": 4,
+    "meeting_duration_minutes": 60,
+    "meetings_count": 1
+  },
+  "whoop": {
+    "recovery_score": 85.0,
+    "hrv_rmssd_milli": 72.4,
+    "resting_heart_rate": 55.0,
+    "sleep_performance": 89.0,
+    "sleep_hours": 8.2,
+    "strain": 12.1,
+    "spo2_percentage": 97.2
+  },
+  "slack": {
+    "messages_sent": 3,
+    "messages_received": 12,
+    "total_messages": 15,
+    "channels_active": 2
+  },
+  "rescuetime": {
+    "focus_seconds": 540,
+    "distraction_seconds": 120,
+    "neutral_seconds": 240,
+    "active_seconds": 900,
+    "app_switches": 4,
+    "productivity_score": 72,
+    "top_activity": "VS Code"
+  },
+  "omi": {
+    "conversation_active": true,
+    "word_count": 187,
+    "duration_seconds": 420,
+    "language": "en",
+    "topic_tags": ["technical", "planning"]
+  },
+  "metrics": {
+    "cognitive_load_score": 0.72,
+    "focus_depth_index": 0.31,
+    "social_drain_index": 0.58,
+    "context_switch_cost": 0.45,
+    "recovery_alignment_score": 0.88
+  },
+  "metadata": {
+    "day_of_week": "Saturday",
+    "hour_of_day": 9,
+    "minute_of_hour": 0,
+    "is_working_hours": true,
+    "is_active_window": true,
+    "sources_available": ["whoop", "calendar", "slack", "rescuetime", "omi"]
+  }
+}
+```
+
+---
+
+## Field Reference
+
+### Top Level
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `window_id` | string | ISO datetime of window start (no timezone) |
+| `date` | string | YYYY-MM-DD |
+| `window_start` | string | ISO datetime with timezone |
+| `window_end` | string | ISO datetime with timezone |
+| `window_index` | int | 0–95 (window 0 = 00:00, window 36 = 09:00) |
+
+### metrics
+
+| Field | Range | Description |
+|-------|-------|-------------|
+| `cognitive_load_score` | 0.0–1.0 | CLS |
+| `focus_depth_index` | 0.0–1.0 | FDI |
+| `social_drain_index` | 0.0–1.0 | SDI |
+| `context_switch_cost` | 0.0–1.0 | CSC |
+| `recovery_alignment_score` | 0.0–1.0 | RAS |
+
+### metadata
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_working_hours` | bool | Window falls within 08:00–20:00 |
+| `is_active_window` | bool | At least one source shows activity |
+| `sources_available` | list | Which collectors returned data for this window |
+
+---
+
+## Working with JSONL
+
+```python
+import json
+from pathlib import Path
+
+# Read a day's data
+windows = []
+path = Path("data/chunks/2026-03-14.jsonl")
+with open(path) as f:
+    for line in f:
+        windows.append(json.loads(line))
+
+# Filter to working hours only
+active = [w for w in windows if w["metadata"]["is_working_hours"]]
+
+# Average CLS across working day
+avg_cls = sum(w["metrics"]["cognitive_load_score"] for w in active) / len(active)
+print(f"Average CLS: {avg_cls:.2f}")
+```
+
+---
+
+## Immutability
+
+JSONL files are treated as **immutable** once written. The pipeline appends, not updates.
+
+To modify historical data (e.g. after a formula change):
+
+```bash
+python3 scripts/recompute_metrics.py --date 2026-03-14
+```
+
+This overwrites the file with recomputed metrics while preserving raw signals.

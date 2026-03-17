@@ -1,0 +1,58 @@
+---
+title: "Prerequisites"
+description: "What you need before running Presence Tracker."
+---
+
+# Prerequisites
+
+---
+
+## System
+
+- **Python 3.11+**
+- **macOS** (tested on macOS 15.x, arm64) — Linux should work but is untested
+- **Temporal server** running locally (`localhost:7233`)
+
+## Credentials
+
+### WHOOP
+
+A WHOOP developer app with OAuth credentials. Tokens are stored at `~/.clawdbot/whoop-tokens.json` and are auto-refreshed.
+
+To set up: follow the WHOOP skill setup guide at `~/clawd/skills/whoop-health-analysis/SKILL.md`.
+
+### Google Calendar
+
+The `gog` CLI authenticated with `david@szabostuban.com`. Presence Tracker calls `gog calendar` commands — no separate OAuth needed.
+
+```bash
+gog auth david@szabostuban.com
+```
+
+### Slack
+
+Presence Tracker uses OpenClaw's Slack integration — no separate token. OpenClaw must be running.
+
+### RescueTime
+
+An API key from your [RescueTime account settings](https://www.rescuetime.com/anapi/manage).
+
+Set it one of two ways:
+```bash
+# Option 1: environment variable
+export RESCUETIME_API_KEY=your_key_here
+
+# Option 2: add to ~/.clawdbot/clawdbot.json
+{
+  "rescuetime_api_key": "your_key_here"
+}
+```
+
+### Omi
+
+Omi ambient transcripts are written to `~/omi/` by the Omi wearable pipeline (`ambient-alfred` OpenClaw plugin). If Omi is not set up, this source will be absent from windows — all other metrics still work.
+
+## Services
+
+- **Temporal** — `cd ~/services/temporal && docker compose up -d`
+- **OpenClaw** — running (provides Slack + gateway access)

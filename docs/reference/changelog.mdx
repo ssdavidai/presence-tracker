@@ -1,0 +1,88 @@
+---
+title: "Changelog"
+description: "Version history — from v1.0 to v9.2 in one day."
+---
+
+# Changelog
+
+Presence Tracker went from v1.0 to v9.2 autonomously in 13 hours on 2026-03-14 via the Alfred self-improvement loop.
+
+---
+
+## v9.2.0 — 2026-03-14
+
+- Multi-day trend table (`scripts/report.py --trend N`)
+- Weekly terminal summary (`scripts/report.py --week`)
+
+## v9.1.0 — 2026-03-14
+
+- MidDayCheckInWorkflow — 13:00 Budapest Monday–Friday cognitive pulse
+- EveningWindDownWorkflow — 18:00 Budapest day-type classification + wind-down
+
+## v7.3.0 — 2026-03-14
+
+- Daily Presence Score (DPS) — single composite 0–100 score replacing multi-metric summary
+
+## v7.2.0 — 2026-03-14
+
+- MonthlyMLRetrainWorkflow — automated 1st-of-month retraining via Temporal
+
+## v7.0.0 — 2026-03-14
+
+- Calendar-aware morning brief — includes next events in readiness recommendation
+- Cognitive Debt Index (CDI) — rolling multi-day fatigue accumulation score
+
+## v6.0.0 — 2026-03-14
+
+- Personal baseline — personalised readiness tier thresholds that learn your normal
+
+## v5.0.0 — 2026-03-14
+
+- Multi-source anomaly alerts — CLS spike, FDI collapse, RAS misalignment detection
+
+## v4.0.0 — 2026-03-14
+
+- Daily HTML presence dashboard (`analysis/dashboard.py`)
+
+## v2.0.0 — 2026-03-14
+
+- Omi transcript integration — ambient conversation signals (word count, language, topic tags) feeding all five metrics
+
+## v1.16.0 — 2026-03-14
+
+- Historical recompute (`scripts/recompute_metrics.py`)
+
+## v1.15.0 — 2026-03-14
+
+- CLS sparkline in nightly digest
+
+## v1.14.0 — 2026-03-14
+
+- Morning readiness brief (07:00 Budapest, `MorningBriefWorkflow`)
+
+## v1.13.0 — 2026-03-14
+
+- ML model layer — Isolation Forest, Random Forest, KMeans
+
+## v1.12.0 — 2026-03-14
+
+- Rich weekly analytics — week-over-week metric deltas, best/worst day
+
+## v1.11.0 — 2026-03-14
+
+- RescueTime collector — focus/distraction/app switches feeding CSC and FDI
+
+## v1.10.0 — 2026-03-14
+
+- RAS formula fix — smooth tanh curve replacing hard thresholds
+
+## v1.9.0 — 2026-03-14
+
+- Daily digest — nightly Slack DM with full metric breakdown and sparkline
+
+## v1.0.0 — 2026-03-13
+
+- Initial release: WHOOP + Google Calendar + Slack collectors
+- 5 metrics: CLS, FDI, SDI, CSC, RAS
+- 4 Temporal workflows: DailyIngestion, MorningBrief, WeeklyAnalysis, MonthlyMLRetrain
+- 26 test files, ~470 passing tests

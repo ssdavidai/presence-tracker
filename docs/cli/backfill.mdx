@@ -1,0 +1,50 @@
+---
+title: "backfill.py"
+description: "Ingest historical data for past dates."
+---
+
+# backfill.py
+
+`scripts/backfill.py` — ingest historical data. Fetches from all live APIs and processes into JSONL, same as the daily pipeline.
+
+---
+
+## Usage
+
+```bash
+# Last 30 days
+python3 scripts/backfill.py --days 30
+
+# Specific date range
+python3 scripts/backfill.py --start 2026-01-01 --end 2026-03-01
+
+# Single date
+python3 scripts/backfill.py --date 2026-03-14
+
+# Skip dates that already have data
+python3 scripts/backfill.py --days 60 --skip-existing
+```
+
+---
+
+## Notes
+
+- API rate limits apply. WHOOP allows ~100 days of history. RescueTime allows up to 6 months.
+- Backfill skips dates where WHOOP data is unavailable (WHOOP is required for RAS).
+- Existing JSONL files are overwritten by default. Use `--skip-existing` to preserve them.
+
+---
+
+## Output
+
+```
+Backfilling 30 days (2026-02-13 → 2026-03-14)...
+
+2026-02-13  ✓  whoop=ok  calendar=ok  slack=ok  rescuetime=ok  omi=missing
+2026-02-14  ✓  all sources
+2026-02-15  ✗  WHOOP: no data for date (skipped)
+...
+2026-03-14  ✓  all sources
+
+Completed: 28 days ingested, 2 skipped (no WHOOP data)
+```

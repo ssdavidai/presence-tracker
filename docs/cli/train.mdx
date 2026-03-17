@@ -1,0 +1,63 @@
+---
+title: "train_model.py"
+description: "Manually train or retrain the ML models."
+---
+
+# train_model.py
+
+`scripts/train_model.py` — manually train or retrain the three ML models on all accumulated data.
+
+Normally runs automatically on the 1st of each month via `MonthlyMLRetrainWorkflow`.
+
+---
+
+## Usage
+
+```bash
+# Train on all available data
+python3 scripts/train_model.py
+
+# Force training even with <60 days of data
+python3 scripts/train_model.py --force
+
+# Train a specific model only
+python3 scripts/train_model.py --model anomaly
+python3 scripts/train_model.py --model recovery
+python3 scripts/train_model.py --model clusters
+```
+
+---
+
+## Output
+
+```
+Training on 47 days of data...
+
+Anomaly detector (Isolation Forest)
+  ✓ Trained on 47 days (4,464 windows)
+  Contamination: 0.05
+  Feature importance: CLS 0.31, FDI 0.28, CSC 0.21, SDI 0.12, RAS 0.08
+
+Recovery predictor (Random Forest)
+  ✓ Trained on 46 days (excluded 1 day missing WHOOP)
+  R² = 0.71 · MAE = 6.2 recovery points
+  RMSE = 8.1
+  Feature importance: today_dps 0.38, cdi 0.22, sleep_hours 0.19, ...
+
+Focus clusters (KMeans, k=4)
+  ✓ Trained on 47 days
+  Silhouette score: 0.43
+  Cluster distribution: Deep Work 38%, Meeting Heavy 21%, Recovery 17%, Fragmented 24%
+
+Models saved to data/models/
+```
+
+---
+
+## Minimum Data Requirements
+
+| Model | Minimum days | Notes |
+|-------|-------------|-------|
+| Anomaly detector | 60 | Below this, use `--force`; expect high false positive rate |
+| Recovery predictor | 30 | Needs enough WHOOP cycles to learn patterns |
+| Focus clusters | 20 | Clusters stabilise with more data |

@@ -1,0 +1,62 @@
+---
+title: "Dashboard"
+description: "The daily HTML dashboard — a full-resolution visual of your cognitive day."
+---
+
+# Dashboard
+
+Every nightly ingestion generates a static HTML dashboard at `data/dashboard/YYYY-MM-DD.html`.
+
+---
+
+## What's on the Dashboard
+
+### Metric Heatmap
+A 96-column timeline (00:00 → 23:45) with one row per metric. Colour intensity reflects value — dark = high, light = low.
+
+### Load Curve
+Hourly CLS plotted as a line chart across the full day.
+
+### Source Availability
+Which data sources were active in each window (calendar, Slack, RescueTime, WHOOP, Omi).
+
+### DPS Gauge
+The day's Daily Presence Score displayed as a dial gauge, 0–100.
+
+### WHOOP Panel
+Recovery, HRV, sleep hours, and strain for the day.
+
+### CDI Trend
+7-day Cognitive Debt Index shown as a sparkline.
+
+---
+
+## Generating a Dashboard
+
+Dashboards are generated automatically during nightly ingestion. To regenerate manually:
+
+```bash
+# Today
+python3 scripts/generate_dashboard.py
+
+# Specific date
+python3 scripts/generate_dashboard.py --date 2026-03-14
+```
+
+---
+
+## Viewing
+
+Open any `.html` file directly in your browser:
+
+```bash
+open data/dashboard/2026-03-14.html
+```
+
+Or serve the directory over your Tailscale network to view on another device:
+
+```bash
+cd data/dashboard
+python3 -m http.server 8888
+# → accessible at http://100.85.18.72:8888/
+```

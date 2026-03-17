@@ -1,0 +1,79 @@
+---
+title: "Nightly Digest"
+description: "23:45 Budapest — the full day's cognitive picture after all data is in."
+---
+
+# Nightly Digest
+
+**Schedule:** 23:45 Budapest (22:45 UTC), every day.
+
+**Delivered to:** David Szabo-Stuban via Slack DM.
+
+The digest fires as part of `DailyIngestionWorkflow` — after all sources have been collected and metrics computed.
+
+---
+
+## Format
+
+```
+🧠 Presence Report — Saturday 14 Mar
+
+Recovery: 86% · HRV: 79ms · Sleep: 6.7h
+─────────────────────────────────────────
+CLS   0.07  ████░░░░░░ light
+FDI   0.94  █████████░ deep focus
+SDI   0.01  ░░░░░░░░░░ isolated
+RAS   0.98  █████████░ aligned
+DPS   81    ████████░░ strong day
+
+Load curve: ▁▁▄▃▂▁▂▂▁▁▁▁▁  (7am–10pm)
+Peak: 09:00 (0.72 — meeting + high Slack)
+
+CDI: 92 · 7-day trend: ↑ recovering
+```
+
+---
+
+## Components
+
+### Metric bars
+
+Each metric is shown as a filled bar (10 chars) with a qualitative label.
+
+| Metric | Low label | High label |
+|--------|-----------|-----------|
+| CLS | light | intense |
+| FDI | fragmented | deep focus |
+| SDI | isolated | maxed out |
+| RAS | misaligned | aligned |
+
+### Load curve sparkline
+
+CLS plotted hourly from 07:00 to 22:00 using Unicode block characters (▁▂▃▄▅▆▇█). Shows when during the day cognitive load peaked.
+
+### DPS
+
+Single 0–100 score with a qualitative label:
+
+| Score | Label |
+|-------|-------|
+| 80–100 | strong day |
+| 60–79 | solid day |
+| 40–59 | moderate day |
+| 0–39 | heavy day |
+
+### CDI and trend
+
+Rolling Cognitive Debt Index with a directional arrow (↑ recovering / → stable / ↓ accumulating).
+
+---
+
+## Trigger
+
+Part of `DailyIngestionWorkflow`. Also triggers anomaly alerts if thresholds are breached.
+
+To trigger manually:
+
+```bash
+python3 scripts/run_daily.py
+```

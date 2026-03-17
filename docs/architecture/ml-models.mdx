@@ -1,0 +1,109 @@
+---
+title: "ML Models"
+description: "Three models trained on accumulated history — anomaly detection, recovery prediction, and focus clustering."
+---
+
+# ML Models
+
+Three scikit-learn models are trained on all accumulated JSONL data. They retrain automatically on the 1st of each month via the `MonthlyMLRetrainWorkflow`.
+
+Models are stored in `data/models/` as `.pkl` files.
+
+<Warning>
+  Models require **≥60 days of data** to be statistically meaningful. Before that threshold, they run as warm-up baselines. Anomaly detection may fire false positives with limited history.
+</Warning>
+
+---
+
+## Anomaly Detector — Isolation Forest
+
+**File:** `data/models/anomaly_detector.pkl`
+
+**Algorithm:** Isolation Forest (unsupervised)
+
+**What it does:** Flags days where the combination of metrics is unusual vs your accumulated personal baseline.
+
+**Features used:**
+- CLS, FDI, SDI, CSC, RAS (daily averages)
+- DPS
+- Recovery score
+- Day of week
+
+**Output:**
+- `anomaly_score` — the Isolation Forest contamination score
+- `is_anomaly` — boolean flag
+
+An anomaly is not necessarily bad — a remarkably good day is also anomalous. Context matters.
+
+---
+
+## Recovery Predictor — Random Forest
+
+**File:** `data/models/recovery_predictor.pkl`
+
+**Algorithm:** Random Forest Regressor
+
+**What it does:** Predicts tomorrow's WHOOP recovery score from today's cognitive patterns.
+
+**Features used:**
+- Today's CLS, FDI, SDI, CSC, RAS
+- Today's sleep hours and performance
+- CDI (rolling debt)
+- Day of week (weekend vs weekday)
+
+**Output:** Predicted recovery percentage for tomorrow (0–100).
+
+Used in the morning brief to flag "if you maintain today's pattern, tomorrow's recovery is projected at X%."
+
+---
+
+## Focus Clusters — KMeans
+
+**File:** `data/models/focus_clusters.pkl`
+
+**Algorithm:** KMeans (k=4)
+
+**What it does:** Labels each day into one of four focus archetypes.
+
+| Cluster label | Characteristics |
+|--------------|----------------|
+| **Deep Work** | High FDI, low SDI, moderate CLS, low CSC |
+| **Meeting Heavy** | Low FDI, high SDI, high CLS, moderate CSC |
+| **Recovery** | Low CLS across the board, low Slack volume |
+| **Fragmented** | High CSC, variable FDI, mid CLS |
+
+The cluster label appears in the weekly Intuition report and in the `data/summary/` rolling stats.
+
+---
+
+## Training
+
+### Automatic retraining
+
+`MonthlyMLRetrainWorkflow` runs on the 1st of each month at 02:00 Budapest. It:
+
+1. Reads all available JSONL from `data/chunks/`
+2. Extracts per-day feature vectors
+3. Retrains all three models
+4. Saves updated `.pkl` files
+5. Logs training stats to Slack
+
+### Manual retraining
+
+```bash
+# Train on all available data
+python3 scripts/train_model.py
+
+# Force train even with <60 days of data
+python3 scripts/train_model.py --force
+```
+
+### Training output
+
+```
+Training on 47 days of data...
+Anomaly detector: trained (contamination=0.05)
+Recovery predictor: R²=0.71, MAE=6.2% recovery points
+Focus clusters: 4 clusters, silhouette=0.43
+Models saved to data/models/
+```

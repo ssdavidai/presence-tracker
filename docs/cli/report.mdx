@@ -1,0 +1,62 @@
+---
+title: "report.py"
+description: "Terminal presence report — view any day, trend table, or weekly summary."
+---
+
+# report.py
+
+`scripts/report.py` — terminal presence report. No Slack, no LLM — just numbers in your terminal.
+
+---
+
+## Usage
+
+```bash
+# Specific date
+python3 scripts/report.py --date 2026-03-14
+
+# Last N days trend table
+python3 scripts/report.py --trend 7
+
+# Weekly terminal summary
+python3 scripts/report.py --week
+```
+
+---
+
+## Single Date Output
+
+```
+Presence Report — Saturday 2026-03-14
+════════════════════════════════════════════════
+WHOOP    Recovery: 86% 🟢  HRV: 79ms  Sleep: 6.7h (82%)
+
+Metrics (working hours avg):
+  CLS:  0.07  ████░░░░░░  light
+  FDI:  0.94  █████████░  deep focus
+  SDI:  0.01  ░░░░░░░░░░  isolated
+  CSC:  0.04  ░░░░░░░░░░  minimal
+  RAS:  0.98  █████████░  aligned
+
+Composite:
+  DPS:  81    ████████░░  strong day
+  CDI:  92                no debt
+
+Sources:  whoop ✓  calendar ✓  slack ✓  rescuetime ✓  omi ✓
+Active windows: 42 / 96 (working hours: 28)
+```
+
+---
+
+## Trend Table Output (--trend 7)
+
+```
+Date         CLS   FDI   SDI   RAS   DPS   CDI  Recovery
+2026-03-08   0.31  0.72  0.22  0.81   74    88    79%
+2026-03-09   0.18  0.88  0.09  0.95   85    91    92%
+2026-03-10   0.42  0.58  0.31  0.69   63    87    67%
+2026-03-11   0.09  0.91  0.05  0.97   88    90    88%
+2026-03-12   0.55  0.44  0.48  0.52   52    82    55%
+2026-03-13   0.28  0.76  0.18  0.87   78    86    81%
+2026-03-14   0.07  0.94  0.01  0.98   81    92    86%
+```

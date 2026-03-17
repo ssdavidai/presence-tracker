@@ -1,0 +1,60 @@
+---
+title: "Morning Brief"
+description: "07:00 Budapest — a readiness brief before the day starts."
+---
+
+# Morning Brief
+
+**Schedule:** 07:00 Budapest (06:00 UTC), every day.
+
+**Delivered to:** David Szabo-Stuban via Slack DM.
+
+---
+
+## Format
+
+```
+🧠 Morning Brief — Saturday 14 Mar
+
+Recovery: 86% (Green) · HRV: 79ms · Sleep: 6.7h (82%)
+Readiness: HIGH — push today, your body can take it
+
+Yesterday: CLS 0.07 | FDI 0.94 | DPS 81 | CDI: 92 (no debt)
+
+📈 7-day trends: HRV +3ms · Recovery stable · Load light
+```
+
+---
+
+## Readiness Tiers
+
+| Tier | Recovery threshold | Recommendation |
+|------|-------------------|---------------|
+| **HIGH** | ≥75% | Push. High cognitive load is appropriate today. |
+| **MODERATE** | 50–74% | Steady. Protect deep focus blocks. |
+| **LOW** | <50% | Protect. Reduce load where possible. |
+
+Thresholds are personalized over time via `analysis/personal_baseline.py`.
+
+---
+
+## Data Sources
+
+| Field | Source |
+|-------|--------|
+| Recovery %, HRV, Sleep hours, Sleep performance | WHOOP (yesterday's cycle) |
+| CLS, FDI, DPS | Yesterday's JSONL |
+| CDI | Rolling 7-day summary |
+| 7-day trends | `data/summary/rolling_7d.json` |
+
+---
+
+## Trigger
+
+`MorningBriefWorkflow` in Temporal. WHOOP data is typically available by 06:00 Budapest — the 07:00 schedule provides a safe buffer.
+
+To trigger manually:
+
+```bash
+python3 scripts/run_morning.py
+```
