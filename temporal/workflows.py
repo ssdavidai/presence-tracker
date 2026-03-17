@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
         run_weekly_summary,
         send_morning_readiness_brief,
         send_midday_checkin,
+        send_evening_winddown,
         notify_slack_presence,
         generate_daily_dashboard,
         generate_weekly_dashboard,
@@ -340,6 +341,58 @@ class MonthlyMLRetrainWorkflow:
 
         except Exception as e:
             error_msg = f"[PRESENCE] Monthly ML retrain FAILED: {str(e)}"
+            workflow.logger.error(error_msg)
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[error_msg],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            raise
+
+
+@workflow.defn
+class EveningWindDownWorkflow:
+    """
+    Evening wind-down signal — end-of-workday cognitive wrap-up.
+
+    Fills the gap between the midday check-in (13:00) and the nightly
+    digest (23:45). Fires at end-of-business and answers:
+      1. How did today go? (day type: PRODUCTIVE / DEEP / REACTIVE / etc.)
+      2. Was it balanced? (load arc: front-loaded / back-loaded / even)
+      3. What should I do now? (concrete wind-down recommendation)
+
+    The workflow silently skips when fewer than 3 active workday windows
+    exist (e.g. weekend, public holiday, or very light day) — not an error.
+
+    Schedule: 17:00 UTC = 18:00 Budapest (CET/UTC+1), daily
+    """
+
+    @workflow.run
+    async def run(self, date_str: str = None) -> str:
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        workflow.logger.info(f"Starting evening wind-down for {date_str}")
+
+        try:
+            ok = await workflow.execute_activity(
+                send_evening_winddown,
+                args=[date_str],
+                start_to_close_timeout=DEFAULT_TIMEOUT,
+                retry_policy=RETRY_POLICY,
+            )
+
+            status = "sent" if ok else "skipped"
+            await workflow.execute_activity(
+                notify_slack_presence,
+                args=[f"[PRESENCE] Evening wind-down {status} — {date_str}"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            return f"Evening wind-down {status}: {date_str}"
+
+        except Exception as e:
+            error_msg = f"[PRESENCE] Evening wind-down FAILED for {date_str}: {str(e)}"
             workflow.logger.error(error_msg)
             await workflow.execute_activity(
                 notify_slack_presence,

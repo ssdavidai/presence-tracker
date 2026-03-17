@@ -199,6 +199,41 @@ async def send_midday_checkin(date_str: str) -> bool:
 
 
 @activity.defn
+async def send_evening_winddown(date_str: str) -> bool:
+    """Send the evening wind-down DM to David.
+
+    Computes the full workday data (08:00–18:00), classifies the day type
+    (PRODUCTIVE / DEEP / REACTIVE / FRAGMENTED / RECOVERY / MIXED), computes
+    the load arc (front-loaded / back-loaded / even), and sends a ~6-line
+    Slack DM with a concrete wind-down recommendation.
+
+    Runs at 17:00 UTC = 18:00 Budapest via EveningWindDownWorkflow.
+    Gracefully skips when fewer than 3 active workday windows exist.
+
+    Returns True if the DM was sent (or gracefully skipped — not an error).
+    """
+    from analysis.evening_winddown import compute_evening_winddown, send_evening_winddown as _send
+    try:
+        winddown = compute_evening_winddown(date_str)
+        if not winddown.is_meaningful:
+            activity.logger.info(
+                f"Evening wind-down not meaningful for {date_str} "
+                f"({winddown.active_windows_count} active workday windows). Skipping."
+            )
+            return True  # Not an error — quiet day
+        ok = _send(date_str)
+        status = "sent" if ok else "failed"
+        activity.logger.info(
+            f"Evening wind-down {status} for {date_str} — "
+            f"day_type={winddown.day_type}, arc={winddown.load_arc}"
+        )
+        return ok
+    except Exception as e:
+        activity.logger.error(f"Evening wind-down failed: {e}")
+        return False
+
+
+@activity.defn
 async def notify_slack_presence(message: str) -> bool:
     """Send a message to #alfred-logs."""
     import urllib.request

@@ -35,6 +35,7 @@ from temporal.workflows import (
     WeeklyAnalysisWorkflow,
     MorningBriefWorkflow,
     MidDayCheckInWorkflow,
+    EveningWindDownWorkflow,
     MonthlyMLRetrainWorkflow,
 )
 
@@ -60,6 +61,17 @@ SCHEDULES = [
         "workflow": MidDayCheckInWorkflow,
         "workflow_id": "presence-midday-checkin-workflow",
         "description": "Midday cognitive check-in — morning load pulse + afternoon recommendation (Mon–Fri)",
+    },
+    {
+        "id": "presence-evening-winddown",
+        # 17:00 UTC = 18:00 Budapest (CET/UTC+1).
+        # Fires at end-of-workday after 8–10 hours of data are available.
+        # Classifies the day type and sends a wind-down recommendation.
+        # Gracefully skips quiet days (< 3 active workday windows).
+        "cron": "0 17 * * *",
+        "workflow": EveningWindDownWorkflow,
+        "workflow_id": "presence-evening-winddown-workflow",
+        "description": "Evening wind-down — day type classification + wind-down recommendation",
     },
     {
         "id": "presence-daily-ingestion",
