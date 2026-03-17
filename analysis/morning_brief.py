@@ -691,6 +691,14 @@ def compute_morning_brief(
         # Only shown when ≥ 3 days with Omi data exist in the transcript history.
         # Returns None when insufficient Omi data or on any error (graceful degradation).
         "conversation_intelligence": _compute_conversation_for_brief(today_date),
+        # v24.0: Burnout Risk Index — 28-day multi-signal trajectory analysis.
+        # Tracks HRV trend, sleep degradation, load creep, focus erosion, and
+        # social drain accumulation over 4 weeks to detect early burnout trajectory.
+        # Answers: "Am I on a path toward burnout — and how urgent is the signal?"
+        # CDI (14-day) tells David his current debt; BRI tells David *where this is heading*.
+        # Only shown in the morning brief at caution or above (tier ≥ 40).
+        # Returns None when < 14 days of data or BRI is healthy/watch.
+        "burnout_risk": _compute_burnout_risk_for_brief(today_date),
     }
 
 
@@ -1174,6 +1182,40 @@ def _compute_conversation_for_brief(date_str: str) -> Optional[dict]:
         return None
 
 
+def _compute_burnout_risk_for_brief(date_str: str) -> Optional[dict]:
+    """
+    Compute the Burnout Risk Index for the morning brief.
+
+    Only returns data at caution tier or above (BRI ≥ 40) — watch/healthy
+    need no morning action and are surfaced in the weekly summary instead.
+    Returns None on any error (graceful degradation).
+
+    v24.0: Complements CDI (debt now) with BRI (trajectory).
+    """
+    try:
+        from analysis.burnout_risk import (
+            compute_burnout_risk,
+            format_bri_line,
+        )
+        bri = compute_burnout_risk(as_of_date_str=date_str, days=28)
+        if not bri.is_meaningful:
+            return None
+        if bri.tier in ("healthy", "watch"):
+            return None
+        line = format_bri_line(bri)
+        return {
+            "bri":             bri.bri,
+            "tier":            bri.tier,
+            "tier_label":      bri.tier_label,
+            "dominant_signal": bri.dominant_signal,
+            "intervention_advice": bri.intervention_advice,
+            "is_meaningful":   True,
+            "line":            line,
+        }
+    except Exception:
+        return None
+
+
 def _format_dps_trend_line(trend: dict, recent_scores: list) -> str:
     """
     Format a compact DPS trend line for the morning brief.
@@ -1519,6 +1561,19 @@ def format_morning_brief_message(brief: dict) -> str:
         if ci_line:
             lines.append("")
             lines.append(f"_{ci_line}_")
+
+    # ── Burnout Risk Index (v24.0) — only at caution/high_risk/critical ──
+    # BRI surfaces here only when the 28-day trajectory warrants morning attention.
+    # At healthy/watch it's omitted from the brief (appears in Sunday weekly summary).
+    burnout_risk = brief.get("burnout_risk")
+    if burnout_risk and burnout_risk.get("is_meaningful"):
+        bri_line = burnout_risk.get("line", "")
+        advice = burnout_risk.get("intervention_advice", "")
+        if bri_line:
+            lines.append("")
+            lines.append(bri_line)
+            if advice:
+                lines.append(f"_{advice}_")
 
     return "\n".join(lines)
 

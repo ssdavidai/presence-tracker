@@ -1,0 +1,145 @@
+---
+title: "Metrics Reference"
+description: "Full mathematical definitions of CLS, FDI, SDI, CSC, RAS, DPS, and CDI."
+---
+
+# Metrics Reference
+
+All five per-window metrics are bounded **0.0 → 1.0**. Higher is not universally better or worse — each metric has a directional interpretation listed below.
+
+---
+
+## CLS — Cognitive Load Score
+
+**Range:** 0 (idle) → 1 (maximum load)
+
+**What it measures:** How mentally demanding was this 15-minute window?
+
+**Inputs:**
+- Calendar: `in_meeting`, `meeting_attendees`, `meetings_count`
+- Slack: `total_messages`, `messages_sent`
+- RescueTime: `app_switches`, `productivity_score`
+- Calendar: back-to-back meeting penalty
+
+**Interpretation:**
+- 0.0–0.3 — light load, idle or low-demand work
+- 0.3–0.6 — moderate, normal productive work
+- 0.6–0.8 — high, meetings or intense context switching
+- 0.8–1.0 — peak load, likely unsustainable
+
+---
+
+## FDI — Focus Depth Index
+
+**Range:** 0 (fragmented) → 1 (deep flow)
+
+**What it measures:** How deep and uninterrupted was your focus?
+
+**Inputs:**
+- RescueTime: `focus_seconds`, `distraction_seconds`, `app_switches`
+- Slack: penalised by high send volume (interruption indicator)
+- Calendar: penalised for meetings (context breaks)
+
+**Interpretation:**
+- 0.8–1.0 — deep flow, minimal interruption
+- 0.5–0.8 — moderate focus, some context switching
+- 0.0–0.5 — fragmented, hard to sustain work
+
+---
+
+## SDI — Social Drain Index
+
+**Range:** 0 (isolated) → 1 (maxed out socially)
+
+**What it measures:** How much social energy was spent?
+
+**Inputs:**
+- Calendar: `meeting_attendees`, `meetings_count`
+- Slack: `messages_sent` (active participation)
+- Omi: `word_count`, `duration_seconds` (ambient conversation)
+
+**Interpretation:**
+- High SDI + low recovery → social fatigue warning
+- SDI is not intrinsically bad; it's a signal to correlate with RAS
+
+---
+
+## CSC — Context Switch Cost
+
+**Range:** 0 (no switching) → 1 (maximum fragmentation)
+
+**What it measures:** Fragmentation penalty — how much context switching occurred?
+
+**Inputs:**
+- RescueTime: `app_switches` (primary driver)
+- Slack: active in multiple channels simultaneously
+- Calendar: back-to-back meetings with different topics
+
+**Interpretation:**
+- High CSC consistently → indicates flow-killing work patterns
+- Correlates inversely with FDI in healthy work days
+
+---
+
+## RAS — Recovery Alignment Score
+
+**Range:** 0 (misaligned) → 1 (perfectly aligned)
+
+**What it measures:** Is your workload appropriate for your physiology today?
+
+**Inputs:**
+- WHOOP: `recovery_score` (primary)
+- CLS for the window (computed first, then fed into RAS)
+
+**Formula:** Smooth `tanh` curve comparing CLS against WHOOP recovery tier.
+
+| Recovery tier | Expected behaviour |
+|--------------|-------------------|
+| **HIGH** (≥75%) | High CLS is fine — push today |
+| **MODERATE** (50–74%) | Moderate CLS acceptable; heavy load penalised |
+| **LOW** (<50%) | Any significant load reduces RAS sharply |
+
+**Interpretation:**
+- RAS close to 1.0 = you're working at the right intensity for your body
+- RAS close to 0.0 = you're pushing hard on a recovery day, or coasting on a green day
+
+---
+
+## DPS — Daily Presence Score
+
+**Range:** 0–100
+
+**What it measures:** Single composite number summarising cognitive quality of the day.
+
+**Formula:** Weighted blend of the five metrics across all active windows:
+
+| Metric | Weight |
+|--------|--------|
+| FDI | 30% |
+| RAS | 25% |
+| CLS (inverted) | 20% |
+| CSC (inverted) | 15% |
+| SDI (inverted) | 10% |
+
+**Interpretation:**
+- 80–100 — excellent cognitive day
+- 60–79 — solid, normal productive day
+- 40–59 — moderate; some overload or fragmentation
+- 0–39 — heavy load day or recovery mismatch
+
+---
+
+## CDI — Cognitive Debt Index
+
+**Range:** 0–100 (higher = less debt)
+
+**What it measures:** Multi-day rolling fatigue balance.
+
+**Formula:** Rolling average of RAS × (1 - normalised CLS) over 7 days, smoothed and scaled to 0–100.
+
+**Interpretation:**
+- 85–100 — recovery consistently ahead of load; no debt
+- 60–84 — small deficit forming; watch for sustained high CLS
+- 0–59 — cognitive debt accumulating; reduce load or prioritise recovery sleep
+
+CDI is reported in the morning brief and nightly digest alongside the day's DPS.

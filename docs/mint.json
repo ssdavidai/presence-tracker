@@ -1,0 +1,65 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "Presence Tracker",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#7C3AED",
+    "light": "#A78BFA",
+    "dark": "#5B21B6"
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/ssdavidai/presence-tracker"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Overview",
+      "pages": ["overview/introduction", "overview/concepts", "overview/metrics"]
+    },
+    {
+      "group": "Architecture",
+      "pages": [
+        "architecture/data-flow",
+        "architecture/collectors",
+        "architecture/engine",
+        "architecture/analysis",
+        "architecture/ml-models",
+        "architecture/temporal"
+      ]
+    },
+    {
+      "group": "Data",
+      "pages": ["data/format", "data/storage", "data/dashboard"]
+    },
+    {
+      "group": "Delivery",
+      "pages": [
+        "delivery/morning-brief",
+        "delivery/nightly-digest",
+        "delivery/weekly-report",
+        "delivery/anomaly-alerts"
+      ]
+    },
+    {
+      "group": "CLI Reference",
+      "pages": ["cli/report", "cli/backfill", "cli/recompute", "cli/export", "cli/status", "cli/train"]
+    },
+    {
+      "group": "Setup",
+      "pages": ["setup/prerequisites", "setup/install", "setup/temporal", "setup/first-run"]
+    },
+    {
+      "group": "Reference",
+      "pages": ["reference/changelog", "reference/spec"]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com/ssdavidai/presence-tracker"
+  }
+}

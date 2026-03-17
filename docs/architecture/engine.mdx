@@ -1,0 +1,104 @@
+---
+title: "Engine"
+description: "The chunker and metric engine — how raw signals become 96-window JSONL."
+---
+
+# Engine
+
+The `engine/` directory contains the core data processing logic. No ML here — just deterministic signal processing.
+
+---
+
+## engine/chunker.py
+
+Creates the 96-window skeleton and attaches signals to it.
+
+**Input:** Raw dicts from each collector + a date string.
+
+**Output:** List of 96 window dicts, each containing all source signals.
+
+### What it does
+
+1. Generates 96 window stubs (00:00 → 23:45)
+2. Calls each collector for the given date
+3. For each collector's output, distributes signals to the correct windows
+4. Tags each window with metadata:
+
+```python
+{
+  "window_id": "2026-03-14T09:00:00",
+  "window_index": 36,
+  "is_working_hours": True,        # 08:00–20:00
+  "is_active_window": True,        # any source shows activity
+  "sources_available": ["whoop", "calendar", "slack", "rescuetime", "omi"]
+}
+```
+
+### Signal attachment logic
+
+| Source | Attachment method |
+|--------|-----------------|
+| WHOOP | Copied to all 96 windows (day-level data) |
+| Calendar | Event spans → all windows within event time range |
+| Slack | 15-min bucket → exact window |
+| RescueTime | 5-min buckets → aggregated to 15-min window |
+| Omi | Transcript timestamps → windows within conversation duration |
+
+---
+
+## engine/metrics.py
+
+Computes CLS, FDI, SDI, CSC, and RAS for each window.
+
+**Input:** List of 96 windows from chunker.
+
+**Output:** Same list, with `metrics` dict appended to each window.
+
+### Formula overview
+
+All formulae output 0.0–1.0. See [Metrics Reference](/overview/metrics) for full definitions.
+
+```python
+window["metrics"] = {
+    "cognitive_load_score": float,
+    "focus_depth_index": float,
+    "social_drain_index": float,
+    "context_switch_cost": float,
+    "recovery_alignment_score": float
+}
+```
+
+### Dependency order
+
+Metrics are computed in this order:
+1. CLS (no dependencies on other metrics)
+2. FDI (no dependencies)
+3. SDI (no dependencies)
+4. CSC (no dependencies)
+5. RAS (depends on CLS — uses it as the "load" input)
+
+---
+
+## engine/store.py
+
+Handles JSONL read/write and rolling statistics.
+
+### Writing
+
+```python
+store.write_day(date, windows)
+# → data/chunks/2026-03-14.jsonl
+```
+
+Each window is written as one JSON line. Existing files are overwritten (idempotent).
+
+### Reading
+
+```python
+windows = store.read_day(date)
+# Returns list of window dicts, or [] if date not found
+```
+
+### Rolling stats
+
+`store.update_summary(date, windows)` maintains rolling 7-day and 30-day aggregate files in `data/summary/`. These feed the CDI calculation and the anomaly detection baseline.

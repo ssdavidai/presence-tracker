@@ -1,0 +1,100 @@
+---
+title: "Data Flow"
+description: "End-to-end pipeline from raw API calls to Slack delivery."
+---
+
+# Data Flow
+
+The full pipeline runs in this order every day during the 23:45 nightly ingestion:
+
+```
+DATA SOURCES
+  WHOOP · Calendar · Slack · RescueTime · Omi transcripts
+       │
+       ▼ (one collector per source)
+COLLECTORS  collectors/
+  whoop.py · gcal.py · slack.py · rescuetime.py · omi.py
+  Each returns a normalised dict for its source's signals
+       │
+       ▼ (raw signals per source)
+CHUNKER  engine/chunker.py
+  Splits day into 96 × 15-min windows (00:00 → 23:45)
+  Attaches all source signals to the correct window
+  Tags: is_working_hours, is_active_window, sources_available
+       │
+       ▼ (windows with raw signals)
+METRIC ENGINE  engine/metrics.py
+  Computes CLS · FDI · SDI · CSC · RAS per window
+  Uses RescueTime app_switches, WHOOP HRV, Slack volume,
+  calendar density — all source signals combined
+       │
+       ▼ (96-window JSONL)
+DATA STORE  data/chunks/YYYY-MM-DD.jsonl
+  One file per day · One JSON line per 15-min window
+  Immutable once written — recompute_metrics.py for updates
+       │
+  ┌────┴────────────────────────────┐
+  ▼                                 ▼
+ANALYSIS                        ML MODELS
+  Daily digest (Slack DM)         Isolation Forest anomaly detect
+  Morning brief (Slack DM)        Random Forest recovery predict
+  Weekly intuition (LLM)          KMeans focus clustering
+  Anomaly alerts                  Trained monthly on all history
+  HTML dashboard
+```
+
+---
+
+## Pipeline Steps
+
+### 1. Collection
+
+Each collector is called independently and returns a normalised dict. Collectors are resilient — a failed API call returns zeroed defaults rather than crashing the pipeline.
+
+```python
+# Example: WHOOP collector output
+{
+  "recovery_score": 85.0,
+  "hrv_rmssd_milli": 72.4,
+  "resting_heart_rate": 55.0,
+  "sleep_performance": 89.0,
+  "sleep_hours": 8.2,
+  "strain": 12.1,
+  "spo2_percentage": 97.2
+}
+```
+
+### 2. Chunking
+
+`engine/chunker.py` creates 96 window stubs and attaches each source's signals to the appropriate window based on timestamp. Calendar events are spread across the windows they span. Slack and RescueTime signals are aggregated per window.
+
+### 3. Metric Computation
+
+`engine/metrics.py` computes all five metrics for each window. Metrics are appended to the window dict under the `metrics` key.
+
+### 4. Storage
+
+`engine/store.py` writes the completed window list to `data/chunks/YYYY-MM-DD.jsonl` — one JSON line per window. It also updates rolling summary stats in `data/summary/`.
+
+### 5. Analysis & Delivery
+
+After ingestion, the analysis layer runs:
+- **Anomaly alerts** — checks thresholds, fires to Slack if breached
+- **Daily digest** — computes DPS, CDI, generates sparkline, sends to Slack DM
+- **Dashboard** — regenerates `data/dashboard/YYYY-MM-DD.html`
+
+---
+
+## Recomputing Metrics
+
+If a metric formula changes, you can recompute without re-fetching API data:
+
+```bash
+# Recompute all historical data
+python3 scripts/recompute_metrics.py --all
+
+# Recompute a specific date
+python3 scripts/recompute_metrics.py --date 2026-03-14
+```
+
+This reads existing JSONL files, re-runs the metric engine, and writes updated files in place.

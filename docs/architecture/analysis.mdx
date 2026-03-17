@@ -1,0 +1,140 @@
+---
+title: "Analysis Layer"
+description: "Intelligence built on top of the daily JSONL — digests, briefings, anomaly alerts, and LLM intuition."
+---
+
+# Analysis Layer
+
+The `analysis/` directory contains everything built on top of the stored JSONL data. This is where raw metrics become actionable intelligence.
+
+---
+
+## analysis/daily_digest.py
+
+Generates the **23:45 nightly Slack DM**.
+
+Reads the day's JSONL, computes DPS, CDI, and a sparkline of the load curve, then formats and sends a structured message:
+
+```
+🧠 Presence Report — Saturday 14 Mar
+
+Recovery: 86% · HRV: 79ms · Sleep: 6.7h
+─────────────────────────────────────────
+CLS   0.07  ████░░░░░░ light
+FDI   0.94  █████████░ deep focus
+SDI   0.01  ░░░░░░░░░░ isolated
+RAS   0.98  █████████░ aligned
+DPS   81    ████████░░ strong day
+
+Load curve: ▁▁▄▃▂▁▂▂▁▁▁▁▁  (7am–10pm)
+Peak: 04:45 (0.245 — 31 Slack msgs)
+
+CDI: 92 · 7-day trend: ↑ recovering
+```
+
+---
+
+## analysis/morning_brief.py
+
+Generates the **07:00 morning Slack DM**.
+
+Reads yesterday's WHOOP data and the previous day's metrics. Computes a readiness tier and sends a brief before the day starts:
+
+```
+🧠 Morning Brief — Saturday 14 Mar
+
+Recovery: 86% (Green) · HRV: 79ms · Sleep: 6.7h (82%)
+Readiness: HIGH — push today, your body can take it
+
+Yesterday: CLS 0.07 | FDI 0.94 | DPS 81 | CDI: 92 (no debt)
+
+📈 7-day trends: HRV +3ms · Recovery stable · Load light
+```
+
+**Readiness tiers:**
+
+| Tier | Recovery | Recommendation |
+|------|----------|---------------|
+| HIGH | ≥75% | Push. High load is appropriate. |
+| MODERATE | 50–74% | Steady. Protect focus blocks. |
+| LOW | <50% | Protect. Reduce load where possible. |
+
+---
+
+## analysis/intuition.py
+
+Generates the **Sunday 21:00 LLM-powered weekly pattern analysis**.
+
+Reads 7 days of JSONL, computes week-over-week deltas, and passes the full context to an LLM (Alfred via OpenClaw). The LLM identifies:
+
+- Correlations between metrics (e.g. "HRV >75ms → FDI >0.8 on 4/5 days")
+- Anomalies and their likely causes
+- Patterns in load distribution across the week
+- Recommendations for the coming week
+
+Delivered as Part 2 of the Sunday weekly report, following the deterministic Part 1.
+
+---
+
+## analysis/anomaly_alerts.py
+
+Fires during nightly ingestion if thresholds are breached.
+
+| Alert | Threshold |
+|-------|-----------|
+| CLS spike | >2 standard deviations above 7-day baseline |
+| FDI collapse | >30% drop vs 7-day average |
+| Recovery misalignment | RAS < 0.4 for 3+ consecutive days |
+
+Alerts are sent immediately as Slack DMs, separate from the scheduled digest.
+
+---
+
+## analysis/presence_score.py
+
+Computes **DPS** (Daily Presence Score, 0–100) from the day's windows.
+
+Uses a weighted blend of the five metrics across all active windows. See [Metrics Reference](/overview/metrics#dps-daily-presence-score) for weights.
+
+---
+
+## analysis/cognitive_debt.py
+
+Computes **CDI** (Cognitive Debt Index) as a rolling 7-day score.
+
+---
+
+## analysis/personal_baseline.py
+
+Maintains personalized readiness tier thresholds.
+
+Over time, the system learns your personal baseline recovery distribution and adjusts tier boundaries accordingly. A person who routinely scores 60% recovery doesn't have the same "normal" as someone who routinely hits 80%.
+
+---
+
+## analysis/dashboard.py
+
+Generates the **daily HTML dashboard** at `data/dashboard/YYYY-MM-DD.html`.
+
+The dashboard visualises:
+- Hourly metric heatmap across all 96 windows
+- Load curve sparkline
+- Source availability timeline
+- DPS gauge and CDI trend
+- Raw WHOOP panel
+
+Dashboards are static HTML — no server needed. Serve any directory with `python3 -m http.server`.
+
+---
+
+## analysis/focus_planner.py
+
+Recommends optimal focus windows for tomorrow based on today's patterns and WHOOP recovery forecast.
+
+Currently used in the morning brief when a strong recovery signal is available.
+
+---
+
+## analysis/ml_model.py
+
+Wrapper for the three ML models. See [ML Models](/architecture/ml-models).

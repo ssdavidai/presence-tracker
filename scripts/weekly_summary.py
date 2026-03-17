@@ -106,6 +106,30 @@ v2.5 — Weekly Flow State + Load Volatility in weekly summary:
 
     Together these answer: "Did I actually do deep work this week, or just
     stay busy?" and "Was my cognitive load predictable or erratic?"
+
+v2.7 — Burnout Risk Index (BRI) in weekly summary:
+    The new Burnout Risk Index module surfaces here each Sunday, giving David
+    an early-warning strategic signal that complements the day-level CDI.
+
+    CDI (14-day) answers: "How much cognitive debt am I carrying right now?"
+    BRI (28-day) answers: "Where is my multi-signal trajectory heading over
+    the next 2–4 weeks if this pattern continues?"
+
+    BRI is a composite of five independently-weighted trend signals:
+      - HRV trend        (30%) — the most reliable physiological burnout predictor
+      - Sleep degradation (20%) — declining sleep quality precedes burnout by 2–4 weeks
+      - Cognitive load creep (20%) — gradually rising CLS signals demand exceeding recovery
+      - Focus erosion    (15%) — declining FDI while load stays high = depletion pattern
+      - Social drain     (15%) — rising SDI without recovery = social energy burnout
+
+    BRI tiers: healthy (<20) / watch (20–40) / caution (40–60) / high_risk (60–80) / critical (>80)
+
+    Only shown in the weekly summary when BRI ≥ watch (> 20); healthy trajectories
+    need no action.  In the nightly digest it surfaces at caution (≥ 40) or above.
+    In the morning brief it appears at caution or above with a specific intervention tip.
+
+    The intervention advice is tier- and dominant-signal-specific:
+      e.g. "HRV declining — this is a physiological stress signal. Take a light day."
 """
 
 import argparse
@@ -1042,6 +1066,28 @@ def format_weekly_message(summary: dict) -> str:
                 lines.append(ci_section.strip())
     except Exception:
         pass  # conversation intelligence is non-critical — never block the weekly summary
+
+    # ── Burnout Risk Index (v2.7) ─────────────────────────────────────────────
+    # BRI analyses 4-week trends across HRV, sleep quality, cognitive load,
+    # focus depth, and social drain to detect early burnout trajectory.
+    # Unlike CDI (current 14-day debt), BRI is a leading indicator:
+    # "If this pattern continues, where is the trajectory heading?"
+    # Only surfaced in the weekly summary when BRI ≥ watch tier (> 20),
+    # since healthy BRI needs no action.
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.burnout_risk import (
+            compute_burnout_risk,
+            format_bri_section,
+        )
+        bri = compute_burnout_risk(as_of_date_str=end_date, days=28)
+        if bri.is_meaningful and bri.tier != "healthy":
+            bri_section = format_bri_section(bri)
+            if bri_section.strip():
+                lines.append("")
+                lines.append(bri_section.strip())
+    except Exception:
+        pass  # BRI is non-critical — never block the weekly summary
 
     lines.append("")
     lines.append("_Presence Tracker · weekly summary_")

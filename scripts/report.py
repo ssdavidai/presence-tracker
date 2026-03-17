@@ -475,6 +475,8 @@ def build_report(date_str: str, compare_days: int = 0) -> dict:
         "flow_state": _compute_flow_state_for_report(windows),
         # Load Volatility Index (v32) — was load smooth or chaotic?
         "load_volatility": _compute_load_volatility_for_report(windows),
+        # Burnout Risk Index (v41) — 28-day multi-signal trajectory
+        "burnout_risk": _compute_burnout_risk_for_report(date_str),
     }
 
 
@@ -717,6 +719,32 @@ def _compute_load_volatility_for_report(windows: list[dict]) -> Optional[dict]:
             "windows_used": lvi.windows_used,
             "insight": lvi.insight,
             "is_meaningful": True,
+        }
+    except Exception:
+        return None
+
+
+def _compute_burnout_risk_for_report(date_str: str) -> Optional[dict]:
+    """
+    Compute Burnout Risk Index (BRI) for the terminal report (v41).
+
+    Returns a dict with bri, tier, tier_label, and terminal_block — or None.
+    Always shows (regardless of tier) in the terminal report for full visibility.
+    """
+    try:
+        from analysis.burnout_risk import compute_burnout_risk, format_bri_terminal
+
+        bri = compute_burnout_risk(as_of_date_str=date_str, days=28)
+        return {
+            "bri": bri.bri,
+            "tier": bri.tier,
+            "tier_label": bri.tier_label,
+            "is_meaningful": bri.is_meaningful,
+            "days_used": bri.days_used,
+            "dominant_signal": bri.dominant_signal,
+            "trajectory_headline": bri.trajectory_headline,
+            "intervention_advice": bri.intervention_advice,
+            "terminal_block": format_bri_terminal(bri),
         }
     except Exception:
         return None
@@ -1023,6 +1051,15 @@ def print_full(report: dict, show_windows: bool = False) -> None:
             ld = lvi["label"].capitalize()
             print(f"  {le} Load pattern  {ld}  (LVI {lvi['lvi']:.2f}  ·  std {lvi['cls_std']:.3f})")
             print(_c(f"               {lvi['insight']}", DIM))
+        print()
+
+    # ── Burnout Risk Index ────────────────────────────────────────────────────
+    bri_data = report.get("burnout_risk")
+    if bri_data:
+        print(_c("  Burnout Risk (28-day trajectory)", BOLD))
+        terminal_block = bri_data.get("terminal_block", "")
+        for line in terminal_block.splitlines():
+            print(f"  {line}")
         print()
 
     # ── Calendar ─────────────────────────────────────────────────────────────

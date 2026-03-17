@@ -1257,6 +1257,46 @@ def _compute_flow_state_for_digest(windows: list[dict]) -> Optional[dict]:
         return None  # Never crash the digest over flow detection
 
 
+def _compute_burnout_risk_for_digest(date_str: str) -> Optional[dict]:
+    """
+    Compute the Burnout Risk Index for the nightly digest.
+
+    Returns a dict with bri, tier, tier_label, line, section — or None when:
+      - fewer than 14 days of data are available
+      - BRI is healthy or watch (no nightly action needed; surfaces in weekly summary)
+      - any exception occurs (never crash the digest)
+
+    v2.9: BRI complements CDI in the nightly digest.
+    CDI = 14-day debt balance (how much fatigue are you carrying right now?)
+    BRI = 28-day trend analysis (where is the multi-signal trajectory heading?)
+    """
+    try:
+        from analysis.burnout_risk import (
+            compute_burnout_risk,
+            format_bri_line,
+            format_bri_section,
+        )
+        bri = compute_burnout_risk(as_of_date_str=date_str, days=28)
+        if not bri.is_meaningful:
+            return None
+        # Only surface in nightly digest when caution or above
+        if bri.tier in ("healthy", "watch"):
+            return None
+        return {
+            "bri":        bri.bri,
+            "tier":       bri.tier,
+            "tier_label": bri.tier_label,
+            "is_meaningful": True,
+            "line":       format_bri_line(bri),
+            "section":    format_bri_section(bri),
+            "dominant_signal": bri.dominant_signal,
+            "trajectory_headline": bri.trajectory_headline,
+            "intervention_advice": bri.intervention_advice,
+        }
+    except Exception:
+        return None  # Never crash the digest over burnout risk
+
+
 # ─── Digest computation ───────────────────────────────────────────────────────
 
 def compute_digest(windows: list[dict]) -> dict:
@@ -1619,6 +1659,15 @@ def compute_digest(windows: list[dict]) -> dict:
         # to maintain momentum.  The cognitive equivalent of an athletic "in the zone" session.
         # (None when insufficient working-hour windows or computation fails)
         "flow_state": _compute_flow_state_for_digest(windows),
+        # v2.9: Burnout Risk Index — 4-week multi-signal trajectory analysis
+        # BRI differs from CDI: CDI measures current debt (14-day balance),
+        # BRI detects *trajectory* across HRV trend, sleep degradation, load creep,
+        # focus erosion, and social drain accumulation over 28 days.
+        # CDI answers "how much debt now?"; BRI answers "where is this heading?"
+        # Only shown in the nightly digest when BRI ≥ caution (≥ 40) — lower tiers
+        # need no nightly intervention, they surface in the Sunday weekly summary.
+        # (None when < 14 days of data or BRI is healthy/watch)
+        "burnout_risk": _compute_burnout_risk_for_digest(date_str),
     }
 
 
@@ -1818,6 +1867,7 @@ def format_digest_message(digest: dict) -> str:
     sleep_target = digest.get("sleep_target")                          # v2.5: sleep target advisor or None
     tomorrow_cognitive_budget = digest.get("tomorrow_cognitive_budget") # v2.6: tomorrow's quality hours or None
     load_volatility = digest.get("load_volatility")                    # v2.7: LVI — how spiky was load? or None
+    burnout_risk = digest.get("burnout_risk")                          # v2.9: BRI — multi-signal trajectory or None
 
     lines = [
         f"*Presence Report — {date_label}*",
@@ -2188,6 +2238,16 @@ def format_digest_message(digest: dict) -> str:
         if sleep_section:
             lines.append("")
             lines.append(sleep_section)
+
+    # ── Burnout Risk Index (v2.9) — only surfaces at caution/high_risk/critical ──
+    # Shown at the end of the digest as a strategic multi-week signal distinct from
+    # the day-level metrics above.  At healthy/watch tier it appears only in the
+    # Sunday weekly summary, keeping nightly digests uncluttered.
+    if burnout_risk and burnout_risk.get("is_meaningful"):
+        bri_section = burnout_risk.get("section", "")
+        if bri_section:
+            lines.append("")
+            lines.append(bri_section)
 
     return "\n".join(lines)
 

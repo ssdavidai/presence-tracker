@@ -1,0 +1,151 @@
+---
+title: "Collectors"
+description: "One file per data source. Each collector normalises its source into a standard dict."
+---
+
+# Collectors
+
+Collectors live in `collectors/`. Each file is responsible for one data source — fetching, parsing, and normalising its signals into a standard dict.
+
+All collectors are **date-scoped**: pass a `date` (YYYY-MM-DD string) and get back that day's data.
+
+---
+
+## collectors/whoop.py
+
+Fetches recovery, sleep, and strain data from the WHOOP API.
+
+**Auth:** Token-based. Tokens stored at `~/.clawdbot/whoop-tokens.json`. Auto-refreshes on expiry.
+
+**Returns (per day):**
+
+```python
+{
+  "recovery_score": float,        # 0–100
+  "hrv_rmssd_milli": float,       # HRV in milliseconds
+  "resting_heart_rate": float,    # BPM
+  "sleep_performance": float,     # 0–100
+  "sleep_hours": float,
+  "strain": float,                # 0–21
+  "spo2_percentage": float        # Blood oxygen
+}
+```
+
+**Notes:**
+- WHOOP data is day-level (not windowed). The chunker attaches it to every window as a static daily context.
+- SpO2 is available from WHOOP 4.0+ only.
+
+---
+
+## collectors/gcal.py
+
+Fetches calendar events from Google Calendar via the `gog` CLI.
+
+**Auth:** `gog` CLI authenticated with `david@szabostuban.com`.
+
+**Returns (per window):**
+
+```python
+{
+  "in_meeting": bool,
+  "meeting_title": str,
+  "meeting_attendees": int,
+  "meeting_duration_minutes": int,
+  "meetings_count": int,          # events overlapping this window
+  "organizer": str
+}
+```
+
+**Notes:**
+- Events are spread across all 15-minute windows they span.
+- Multi-attendee events (≥3) carry a higher SDI weight.
+
+---
+
+## collectors/slack.py
+
+Fetches message activity from the Slack API.
+
+**Auth:** Via OpenClaw's Slack token (no separate key needed).
+
+**Returns (per window):**
+
+```python
+{
+  "messages_sent": int,
+  "messages_received": int,
+  "total_messages": int,
+  "channels_active": int
+}
+```
+
+**Notes:**
+- Counts messages in all channels where David participated.
+- `channels_active` = number of distinct channels with activity in this window.
+
+---
+
+## collectors/rescuetime.py
+
+Fetches computer activity data from the RescueTime API.
+
+**Auth:** `RESCUETIME_API_KEY` env var or `rescuetime_api_key` in `~/.clawdbot/clawdbot.json`.
+
+**Returns (per window):**
+
+```python
+{
+  "focus_seconds": int,
+  "distraction_seconds": int,
+  "neutral_seconds": int,
+  "active_seconds": int,
+  "app_switches": int,
+  "productivity_score": int,      # 0–100
+  "top_activity": str
+}
+```
+
+**Notes:**
+- `app_switches` is the primary driver of CSC.
+- RescueTime granularity is 5-minute buckets; the collector aggregates to 15 minutes.
+
+---
+
+## collectors/omi.py
+
+Reads Omi ambient conversation transcripts from the local filesystem.
+
+**Source:** `~/omi/` — populated by the Omi wearable pipeline.
+
+**Returns (per window):**
+
+```python
+{
+  "conversation_active": bool,
+  "word_count": int,
+  "duration_seconds": int,
+  "language": str,                # "en", "hu", etc.
+  "topic_tags": list[str]         # e.g. ["technical", "planning"]
+}
+```
+
+**Notes:**
+- Topic tagging is handled by `collectors/omi_topics.py`.
+- If no Omi files exist for a window, all fields default to 0/False.
+
+---
+
+## Resilience
+
+All collectors are wrapped in try/except. A failed collector returns zeroed defaults:
+
+```python
+# Default return on any error
+{
+  "error": "WHOOP API timeout",
+  "recovery_score": null,
+  ...all other fields: null
+}
+```
+
+The chunker marks these windows with the failed source absent from `sources_available`.

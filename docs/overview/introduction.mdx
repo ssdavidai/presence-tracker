@@ -1,0 +1,69 @@
+---
+title: "Introduction"
+description: "What WHOOP does for physical strain, Presence Tracker does for cognitive load."
+---
+
+# Presence Tracker
+
+Presence Tracker is a personal cognitive load and mental strain analytics system. It ingests signals from five data sources, slices every day into **96 × 15-minute observation windows**, and computes a set of derived metrics that together describe your mental state throughout the day.
+
+An AI-powered weekly report (**Alfred Intuition**) synthesises patterns and delivers them to Slack. An ML model trains on accumulated history for anomaly detection, recovery prediction, and focus clustering. A daily HTML dashboard visualises the full picture.
+
+<Note>
+  **Current version:** v9.2.0 — built autonomously in a single day (2026-03-14)
+</Note>
+
+---
+
+## The Problem
+
+WHOOP answers: *"How physically recovered are you?"*
+
+Presence Tracker answers: *"How cognitively loaded were you, and why?"*
+
+No single wearable captures the full picture. Mental strain is a composite of:
+
+- **Physiological signals** — WHOOP: HRV, recovery, sleep, RHR
+- **Behavioral signals** — RescueTime: app usage, focus depth, context switching
+- **Social signals** — Slack: message volume, meeting load
+- **Calendar intent** vs. actual execution
+- **Ambient conversation** — Omi transcripts
+
+---
+
+## What It Does
+
+<CardGroup cols={2}>
+  <Card title="5 Core Metrics" icon="chart-bar">
+    CLS, FDI, SDI, CSC, and RAS — one per 15-minute window, all day
+  </Card>
+  <Card title="2 Composite Scores" icon="gauge">
+    DPS (Daily Presence Score, 0–100) and CDI (Cognitive Debt Index)
+  </Card>
+  <Card title="3 Daily Deliveries" icon="bell">
+    Morning brief (07:00), nightly digest (23:45), and on-demand anomaly alerts
+  </Card>
+  <Card title="Weekly Intelligence" icon="brain">
+    Sunday 21:00 — deterministic summary + LLM-powered Alfred Intuition report
+  </Card>
+</CardGroup>
+
+---
+
+## Data Sources
+
+| Source | Signals | Status |
+|--------|---------|--------|
+| **WHOOP** | Recovery %, HRV (rMSSD), RHR, sleep hours, sleep performance, strain, SpO2 | ✅ Live |
+| **Google Calendar** | In-meeting, duration, attendee count, organizer | ✅ Live |
+| **Slack** | Messages sent/received per 15-min window, channels active | ✅ Live |
+| **RescueTime** | Focus seconds, distraction seconds, app switches, productivity score, top activity | ✅ Live |
+| **Omi** | Ambient conversation transcripts — word count, language, topic tags, conversation duration | ✅ Live |
+
+---
+
+## Who Built This
+
+Built autonomously by Alfred (the Szabo-Stuban family AI butler) in 13 hours on 2026-03-14. v1.0 through v9.2 shipped in a single day via the self-improvement loop.
+
+The system runs on a Mac Mini in Törökbálint and delivers all output to David Szabo-Stuban via Slack DM.

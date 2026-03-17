@@ -1,0 +1,94 @@
+---
+title: "Core Concepts"
+description: "The mental model behind Presence Tracker — windows, signals, and derived metrics."
+---
+
+# Core Concepts
+
+Understanding how Presence Tracker works requires three mental models: **observation windows**, **raw signals**, and **derived metrics**.
+
+---
+
+## Observation Windows
+
+The day is divided into **96 × 15-minute windows** — one every quarter hour from 00:00 to 23:45.
+
+Each window is a snapshot of everything happening in that slice of time:
+
+```
+00:00 → 00:15   (window 0)
+00:15 → 00:30   (window 1)
+...
+09:00 → 09:15   (window 36)
+...
+23:45 → 00:00   (window 95)
+```
+
+Every metric is computed **per window**. This gives you a full-resolution picture of how the day evolved — not just a daily average.
+
+<Info>
+  Why 15 minutes? It's the natural granularity for calendar events, RescueTime, and meaningful cognitive transitions. Long enough to reflect real state; short enough to capture dynamics.
+</Info>
+
+---
+
+## Raw Signals
+
+Each data source contributes **raw signals** to each window. The signal is attached to whichever window contains that time.
+
+| Source | Example signals |
+|--------|----------------|
+| WHOOP | `recovery_score: 85`, `hrv_rmssd_milli: 72.4` |
+| Calendar | `in_meeting: true`, `meeting_attendees: 4` |
+| Slack | `messages_sent: 3`, `channels_active: 2` |
+| RescueTime | `app_switches: 4`, `focus_seconds: 540` |
+| Omi | `word_count: 187`, `topic_tags: ["technical"]` |
+
+Signals are **normalised** — each collector returns a standard dict with zero-filled defaults for missing data. A window where WHOOP data is unavailable still gets `recovery_score: null` rather than crashing.
+
+---
+
+## Derived Metrics
+
+Metrics are computed from raw signals using deterministic formulae. No ML in the metric layer — just arithmetic. This keeps them reproducible and recomputable.
+
+The five per-window metrics are:
+
+| Metric | Abbreviation | What it captures |
+|--------|-------------|-----------------|
+| Cognitive Load Score | **CLS** | How mentally demanding was this window? |
+| Focus Depth Index | **FDI** | How deep and uninterrupted was your focus? |
+| Social Drain Index | **SDI** | How much social energy was spent? |
+| Context Switch Cost | **CSC** | Fragmentation penalty |
+| Recovery Alignment Score | **RAS** | Is workload appropriate for your physiology today? |
+
+All five are bounded **0.0 → 1.0**.
+
+---
+
+## Composite Scores
+
+Two higher-order scores aggregate across windows and time:
+
+### DPS — Daily Presence Score (0–100)
+
+A single number summarising the cognitive quality of your day. Computed as a weighted blend of CLS, FDI, SDI, CSC, and RAS across all active windows.
+
+Think of it as WHOOP strain — but for your mind.
+
+### CDI — Cognitive Debt Index (0–100)
+
+A rolling multi-day score. Measures whether your cognitive load is outpacing your recovery. High CDI = you're accumulating fatigue you haven't paid back.
+
+A CDI above 80 indicates recovery is keeping pace. Below 60, patterns of overloading are forming.
+
+---
+
+## Active Windows
+
+Not all 96 windows are meaningful. The system tags each window:
+
+- `is_working_hours` — 08:00–20:00 local time
+- `is_active_window` — at least one data source shows activity
+
+Metrics and scores exclude overnight silent windows from aggregation, but preserve them in the raw JSONL for completeness.
