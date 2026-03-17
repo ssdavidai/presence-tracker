@@ -50,6 +50,7 @@ from scripts.status import (
 def _make_status(
     n_days: int = 5,
     age_days: int = 0,
+    staleness_days: int = 0,
     oldest: str = "2026-03-09",
     newest: str = "2026-03-13",
     avg_cls: float = 0.35,
@@ -70,6 +71,7 @@ def _make_status(
             "oldest": oldest,
             "newest": newest,
             "age_days": age_days,
+            "staleness_days": staleness_days,
             "dates": [oldest, newest],
         },
         "metrics": {
@@ -186,41 +188,50 @@ class TestTrendArrow:
 
 class TestHealthCode:
     def test_healthy_when_fresh(self):
-        s = _make_status(n_days=7, age_days=0)
+        s = _make_status(n_days=7, staleness_days=0)
         assert _health_code(s) == 0
 
     def test_healthy_when_stale_one_day(self):
-        # age=1 means data is from yesterday — normal since ingestion runs at 23:45
-        s = _make_status(n_days=7, age_days=1)
+        # staleness=1 means data is from yesterday — normal since ingestion runs at 23:45
+        s = _make_status(n_days=7, staleness_days=1)
         assert _health_code(s) == 0
 
     def test_warning_when_anomaly_triggered(self):
-        s = _make_status(n_days=7, age_days=0, anomaly_count=1)
+        s = _make_status(n_days=7, staleness_days=0, anomaly_count=1)
         assert _health_code(s) == 1
 
     def test_error_when_no_data(self):
-        s = _make_status(n_days=0, age_days=0)
+        s = _make_status(n_days=0, staleness_days=0)
         assert _health_code(s) == 2
 
     def test_error_when_very_stale(self):
-        s = _make_status(n_days=10, age_days=5)
+        # n_days=10 (10 days of historical data) but staleness=5 (last ingest was 5 days ago)
+        # This is the key regression case: previously age_days=10 was used which confused count
+        # with staleness, causing false ERROR on systems with > 3 days of collected data.
+        s = _make_status(n_days=10, staleness_days=5)
         assert _health_code(s) == 2
+
+    def test_many_days_of_data_but_fresh_is_healthy(self):
+        # This is the regression test: 6+ days of collected data, freshly ingested today.
+        # The old bug would treat age_days=6 (count) as staleness and return ERROR.
+        s = _make_status(n_days=6, age_days=6, staleness_days=0)
+        assert _health_code(s) == 0
 
     def test_error_overrides_anomaly(self):
         # Even with anomaly, primary classification is error due to no data
-        s = _make_status(n_days=0, age_days=0, anomaly_count=1)
+        s = _make_status(n_days=0, staleness_days=0, anomaly_count=1)
         assert _health_code(s) == 2
 
     def test_exactly_two_days_stale_is_warning(self):
-        s = _make_status(n_days=5, age_days=2)
+        s = _make_status(n_days=5, staleness_days=2)
         assert _health_code(s) == 1
 
     def test_exactly_three_days_stale_is_warning(self):
-        s = _make_status(n_days=5, age_days=3)
+        s = _make_status(n_days=5, staleness_days=3)
         assert _health_code(s) == 1
 
     def test_four_days_stale_is_error(self):
-        s = _make_status(n_days=5, age_days=4)
+        s = _make_status(n_days=5, staleness_days=4)
         assert _health_code(s) == 2
 
 
@@ -288,6 +299,32 @@ class TestFmtDataSection:
         text = "\n".join(lines)
         # Should show progress like "5/60" or bar characters
         assert "▓" in text or "░" in text
+
+    def test_freshness_shows_today_when_staleness_zero(self):
+        """staleness_days=0 should display 'today', not a days-ago number."""
+        s = _make_status(n_days=6, age_days=6, staleness_days=0)
+        lines = _fmt_data_section(s["data"])
+        text = "\n".join(lines)
+        assert "today" in text.lower()
+
+    def test_freshness_shows_yesterday_when_staleness_one(self):
+        s = _make_status(n_days=6, staleness_days=1)
+        lines = _fmt_data_section(s["data"])
+        text = "\n".join(lines)
+        assert "yesterday" in text.lower()
+
+    def test_freshness_shows_days_ago_when_stale(self):
+        s = _make_status(n_days=6, staleness_days=4)
+        lines = _fmt_data_section(s["data"])
+        text = "\n".join(lines)
+        assert "4 days ago" in text
+
+    def test_ml_progress_uses_collected_count_not_staleness(self):
+        """ML progress should show 6/60, not 0/60, even when data is fresh (staleness=0)."""
+        s = _make_status(n_days=6, age_days=6, staleness_days=0)
+        lines = _fmt_data_section(s["data"])
+        text = "\n".join(lines)
+        assert "6/60" in text
 
 
 class TestFmtMetricsSection:
@@ -524,7 +561,7 @@ class TestPrintBrief:
 
     @patch("scripts.status._gather_status")
     def test_exit_code_warning(self, mock_gather, capsys):
-        mock_gather.return_value = _make_status(n_days=5, age_days=2)
+        mock_gather.return_value = _make_status(n_days=5, age_days=2, staleness_days=2)
         code = print_brief()
         assert code == 1
 
@@ -543,7 +580,7 @@ class TestPrintBrief:
 
     @patch("scripts.status._gather_status")
     def test_output_label_warn(self, mock_gather, capsys):
-        mock_gather.return_value = _make_status(n_days=5, age_days=2)
+        mock_gather.return_value = _make_status(n_days=5, age_days=2, staleness_days=2)
         print_brief()
         captured = capsys.readouterr()
         assert "[WARN]" in captured.out
@@ -587,7 +624,7 @@ class TestPrintJson:
 
     @patch("scripts.status._gather_status")
     def test_health_string_for_warning(self, mock_gather, capsys):
-        mock_gather.return_value = _make_status(n_days=5, age_days=2)
+        mock_gather.return_value = _make_status(n_days=5, age_days=2, staleness_days=2)
         print_json()
         captured = capsys.readouterr()
         parsed = json.loads(captured.out)
@@ -629,7 +666,7 @@ class TestPrintStatus:
 
     @patch("scripts.status._gather_status")
     def test_warning_exit_code(self, mock_gather, capsys):
-        mock_gather.return_value = _make_status(n_days=5, age_days=2)
+        mock_gather.return_value = _make_status(n_days=5, age_days=2, staleness_days=2)
         code = print_status()
         assert code == 1
 
@@ -645,6 +682,7 @@ class TestGatherStatus:
     @patch("scripts.status.get_data_status")
     @patch("scripts.status.get_recent_summaries")
     @patch("scripts.status.get_date_range")
+    @patch("scripts.status.get_data_staleness_days")
     @patch("scripts.status.get_data_age_days")
     @patch("scripts.status.read_day")
     @patch("scripts.status.list_available_dates")
@@ -653,6 +691,7 @@ class TestGatherStatus:
         mock_dates,
         mock_read_day,
         mock_age,
+        mock_staleness,
         mock_range,
         mock_recent,
         mock_ml,
@@ -671,7 +710,8 @@ class TestGatherStatus:
                 "metadata": {"sources_available": ["whoop", "calendar", "slack"]},
             }
         ]
-        mock_age.return_value = 0
+        mock_age.return_value = 1
+        mock_staleness.return_value = 0
         mock_range.return_value = ("2026-03-13", "2026-03-13")
         mock_recent.return_value = [
             {
@@ -703,10 +743,13 @@ class TestGatherStatus:
         assert "ml" in result
         assert "dashboard" in result
         assert "anomalies" in result
+        # staleness_days should be present in the data block
+        assert "staleness_days" in result["data"]
 
     @patch("scripts.status.get_data_status")
     @patch("scripts.status.get_recent_summaries")
     @patch("scripts.status.get_date_range")
+    @patch("scripts.status.get_data_staleness_days")
     @patch("scripts.status.get_data_age_days")
     @patch("scripts.status.read_day")
     @patch("scripts.status.list_available_dates")
@@ -715,6 +758,7 @@ class TestGatherStatus:
         mock_dates,
         mock_read_day,
         mock_age,
+        mock_staleness,
         mock_range,
         mock_recent,
         mock_ml,
@@ -722,6 +766,7 @@ class TestGatherStatus:
         mock_dates.return_value = []
         mock_read_day.return_value = []
         mock_age.return_value = 0
+        mock_staleness.return_value = 0
         mock_range.return_value = (None, None)
         mock_recent.return_value = []
         mock_ml.return_value = {
@@ -741,6 +786,7 @@ class TestGatherStatus:
     @patch("scripts.status.get_data_status")
     @patch("scripts.status.get_recent_summaries")
     @patch("scripts.status.get_date_range")
+    @patch("scripts.status.get_data_staleness_days")
     @patch("scripts.status.get_data_age_days")
     @patch("scripts.status.read_day")
     @patch("scripts.status.list_available_dates")
@@ -749,6 +795,7 @@ class TestGatherStatus:
         mock_dates,
         mock_read_day,
         mock_age,
+        mock_staleness,
         mock_range,
         mock_recent,
         mock_ml,
@@ -758,7 +805,8 @@ class TestGatherStatus:
         mock_read_day.return_value = [
             {"whoop": {}, "metadata": {"sources_available": ["whoop"]}}
         ]
-        mock_age.return_value = 0
+        mock_age.return_value = 1
+        mock_staleness.return_value = 0
         mock_range.return_value = ("2026-03-13", "2026-03-13")
         mock_recent.return_value = []
         mock_ml.return_value = {

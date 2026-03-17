@@ -348,6 +348,54 @@ class TestGetDataAgeDays:
         assert store.get_data_age_days() == 4
 
 
+class TestGetDataStalenessDays:
+    """get_data_staleness_days() returns calendar days since most recent ingestion."""
+
+    def test_zero_with_no_data(self, tmp_path, monkeypatch):
+        import engine.store as store
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        assert store.get_data_staleness_days() == 0
+
+    def test_zero_when_newest_is_today(self, tmp_path, monkeypatch):
+        import engine.store as store
+        from datetime import date
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        today_str = date.today().isoformat()
+        store.write_day(today_str, make_sample_windows(today_str, count=1))
+        assert store.get_data_staleness_days() == 0
+
+    def test_correct_days_for_past_date(self, tmp_path, monkeypatch):
+        import engine.store as store
+        from datetime import date, timedelta
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        # Write data for 3 days ago
+        three_days_ago = (date.today() - timedelta(days=3)).isoformat()
+        store.write_day(three_days_ago, make_sample_windows(three_days_ago, count=1))
+        assert store.get_data_staleness_days() == 3
+
+    def test_uses_newest_date_not_count(self, tmp_path, monkeypatch):
+        """Staleness reflects the newest date, not the number of files."""
+        import engine.store as store
+        from datetime import date, timedelta
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        # 6 days of data, but newest is yesterday
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        for i in range(6):
+            d = (date.today() - timedelta(days=6 - i)).isoformat()
+            store.write_day(d, make_sample_windows(d, count=1))
+        # Newest is yesterday → staleness should be 1, not 6
+        assert store.get_data_staleness_days() == 1
+
+    def test_does_not_return_negative(self, tmp_path, monkeypatch):
+        """Never returns negative even if newest date is in the future."""
+        import engine.store as store
+        from datetime import date, timedelta
+        monkeypatch.setattr(store, "CHUNKS_DIR", tmp_path)
+        future = (date.today() + timedelta(days=1)).isoformat()
+        store.write_day(future, make_sample_windows(future, count=1))
+        assert store.get_data_staleness_days() == 0
+
+
 class TestGetDateRange:
     def test_none_none_with_no_data(self, tmp_path, monkeypatch):
         import engine.store as store

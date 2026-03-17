@@ -109,9 +109,27 @@ def get_recent_summaries(days: int = 7) -> list[dict]:
 # ─── Stats Helpers ────────────────────────────────────────────────────────────
 
 def get_data_age_days() -> int:
-    """Return how many days of data we have."""
+    """Return how many days of data we have (count of collected days)."""
     dates = list_available_dates()
     return len(dates)
+
+
+def get_data_staleness_days() -> int:
+    """Return how many calendar days have elapsed since the most recent ingestion.
+
+    Returns 0 if data was last collected today, 1 if yesterday, etc.
+    Returns 0 when no data exists (treat as unknown, not stale).
+
+    This is separate from get_data_age_days() which returns the *count* of
+    collected days.  Use this function for freshness / health checks.
+    """
+    dates = list_available_dates()
+    if not dates:
+        return 0
+    newest = date.fromisoformat(dates[-1])
+    today = date.today()
+    delta = (today - newest).days
+    return max(0, delta)
 
 
 def get_date_range() -> tuple[Optional[str], Optional[str]]:

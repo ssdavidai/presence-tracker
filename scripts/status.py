@@ -42,6 +42,7 @@ from engine.store import (
     read_summary,
     get_recent_summaries,
     get_data_age_days,
+    get_data_staleness_days,
     get_date_range,
 )
 from analysis.ml_model import get_data_status
@@ -132,7 +133,8 @@ def _gather_status() -> dict:
 
     # Date range
     oldest, newest = get_date_range() if n_days > 0 else (None, None)
-    age_days = get_data_age_days()
+    age_days = get_data_age_days()          # count of collected days (for ML progress)
+    staleness_days = get_data_staleness_days()  # days since last ingestion (for freshness)
 
     # Rolling summary → recent trends
     recent = get_recent_summaries(days=7)
@@ -227,6 +229,7 @@ def _gather_status() -> dict:
             "oldest": oldest,
             "newest": newest,
             "age_days": age_days,
+            "staleness_days": staleness_days,
             "dates": dates,
         },
         "metrics": {
@@ -263,15 +266,17 @@ def _health_code(status: dict) -> int:
     2 = error    (no data, or very large gap)
     """
     n_days = status["data"]["n_days"]
-    age = status["data"]["age_days"]
+    # Use staleness_days (calendar days since last ingestion) for freshness checks.
+    # age_days is the *count* of collected days and must not be used here.
+    staleness = status["data"].get("staleness_days", status["data"]["age_days"])
 
     if n_days == 0:
         return 2
 
-    if age > 3:
+    if staleness > 3:
         return 2  # Data collection has stopped
 
-    if age > 1:
+    if staleness > 1:
         return 1  # Missed a day
 
     if status["anomalies"].get("count", 0) > 0:
@@ -286,7 +291,9 @@ def _fmt_data_section(data: dict) -> list[str]:
     """Format the data collection section."""
     lines = [_bold("① Data Collection")]
     n = data["n_days"]
-    age = data["age_days"]
+    # staleness_days = calendar days since last ingestion (0 = today, 1 = yesterday …)
+    # age_days = total count of collected days (used for ML progress only)
+    staleness = data.get("staleness_days", data["age_days"])
 
     if n == 0:
         lines.append(f"  {_red('✗ No data collected yet')}")
@@ -296,16 +303,16 @@ def _fmt_data_section(data: dict) -> list[str]:
     # Date range
     lines.append(f"  Days collected:  {_green(str(n))} days  ({data['oldest']} → {data['newest']})")
 
-    # Freshness
-    if age == 0:
+    # Freshness — use staleness (days since last ingestion), not total day count
+    if staleness == 0:
         freshness = _green("today")
-    elif age == 1:
+    elif staleness == 1:
         freshness = _yellow("yesterday")
     else:
-        freshness = _red(f"{age} days ago")
+        freshness = _red(f"{staleness} days ago")
     lines.append(f"  Last ingested:   {freshness}")
 
-    # ML progress
+    # ML progress — use total collected days (age_days = count)
     ml_min = 60
     progress_pct = min(100, round(n / ml_min * 100))
     bar = _bar(min(1.0, n / ml_min), width=16)
@@ -539,9 +546,9 @@ def print_status(no_colour: bool = False) -> int:
 
     # Footer hints
     if status["data"]["n_days"] > 0:
-        age = status["data"]["age_days"]
-        if age > 0:
-            print(_dim(f"  → Run: python3 scripts/run_daily.py  (last ingestion: {age}d ago)"))
+        staleness = status["data"].get("staleness_days", status["data"]["age_days"])
+        if staleness > 0:
+            print(_dim(f"  → Run: python3 scripts/run_daily.py  (last ingestion: {staleness}d ago)"))
 
     return health
 
@@ -552,14 +559,14 @@ def print_brief() -> int:
     health = _health_code(status)
 
     n = status["data"]["n_days"]
-    age = status["data"]["age_days"]
+    staleness = status["data"].get("staleness_days", status["data"]["age_days"])
     cls = status["metrics"].get("avg_cls_7d")
     fdi = status["metrics"].get("avg_fdi_7d")
     ml_days = status["ml"].get("days_of_data", 0)
     ml_min = status["ml"].get("min_days_required", 60)
     newest = status["data"].get("newest", "—")
 
-    parts = [f"data={n}d", f"latest={newest}", f"age={age}d"]
+    parts = [f"data={n}d", f"latest={newest}", f"age={staleness}d"]
     if cls is not None:
         parts.append(f"cls={cls:.2f}")
     if fdi is not None:
