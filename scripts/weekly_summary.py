@@ -83,6 +83,29 @@ v2.3 — Personal Records milestones + Next-week cognitive pacing:
          weekday (to avoid confusing mid-week summaries).
        - The plan is not meaningful (< 3 days of history).
        - Any exception occurs (never blocks the summary).
+
+v2.5 — Weekly Flow State + Load Volatility in weekly summary:
+    Two previously built daily-digest modules now aggregate across the week
+    and surface in the Sunday Slack DM, closing the gap between per-day
+    detail and weekly strategic view.
+
+    1. Flow State weekly summary — compute_weekly_flow_summary() was already
+       implemented in analysis/flow_detector.py but never wired into the
+       weekly output.  Now the weekly summary shows:
+         🌊 Flow: 4/7 days · 6.2h total · peak Wednesday (112min)
+       David can see at a glance how much deep-flow work the week contained
+       — not just average FDI (which blurs together active and idle windows).
+
+    2. Load Volatility weekly summary — compute_weekly_lvi_summary() (new,
+       added to analysis/load_volatility.py) aggregates per-day LVI across
+       the week and surfaces noteworthy patterns:
+         ⚡ Load rhythm: 2 volatile days this week — high cognitive switching cost
+         〰️ Load rhythm: Smooth week (LVI avg 0.84) — consistent cognitive demand
+       Only shown when noteworthy (≥ 2 volatile days, or ≥ 4 smooth days);
+       average/steady weeks are silently skipped to avoid noise.
+
+    Together these answer: "Did I actually do deep work this week, or just
+    stay busy?" and "Was my cognitive load predictable or erratic?"
 """
 
 import argparse
@@ -849,6 +872,58 @@ def format_weekly_message(summary: dict) -> str:
             lines.append(rhythm_line)
     except Exception:
         pass  # rhythm is non-critical — never block the weekly summary
+
+    # ── Flow State weekly summary (v2.5) ─────────────────────────────────────
+    # Aggregates per-day flow state detection across the week.
+    # compute_weekly_flow_summary() loads each day's JSONL and detects
+    # contiguous flow sessions (high FDI + moderate CLS + low CSC ≥ 30 min).
+    # Only surfaced when there are ≥ 2 days with meaningful flow data.
+    # Shows: total flow minutes, days with flow, best flow day.
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.flow_detector import compute_weekly_flow_summary
+        # Build the per-day structure the aggregator expects
+        week_dates_for_flow = _week_dates(end_date)
+        flow_day_entries = [{"date": d} for d in week_dates_for_flow]
+        flow_weekly = compute_weekly_flow_summary(flow_day_entries)
+
+        flow_days = flow_weekly.get("flow_days", 0)
+        total_flow_min = flow_weekly.get("total_flow_minutes", 0)
+        avg_flow_min = flow_weekly.get("avg_flow_minutes_per_day", 0.0)
+        best_flow_day = flow_weekly.get("best_flow_day")
+        best_flow_min = flow_weekly.get("best_flow_minutes", 0)
+
+        # Only surface when there's meaningful data (≥ 1 day with flow)
+        if flow_days >= 1 and total_flow_min >= 30:
+            total_flow_h = total_flow_min / 60
+            lines.append("")
+            flow_line = f"🌊 Flow: {flow_days}/7 days · {total_flow_h:.1f}h total"
+            if best_flow_day:
+                best_flow_h = best_flow_min / 60
+                flow_line += f" · peak {_day_label(best_flow_day)} ({best_flow_min}min)"
+            lines.append(flow_line)
+    except Exception:
+        pass  # flow is non-critical — never block the weekly summary
+
+    # ── Load Volatility weekly summary (v2.5) ────────────────────────────────
+    # Shows whether the week had a smooth, steady, or erratic cognitive rhythm.
+    # LVI (Load Volatility Index) measures CLS consistency across active windows.
+    # Only surfaced when noteworthy: volatile/variable days dominate, or
+    # the week was notably smooth (≥ 4 smooth days).
+    # Degrades silently — never blocks the weekly summary.
+    try:
+        from analysis.load_volatility import (
+            compute_weekly_lvi_summary,
+            format_weekly_lvi_line,
+        )
+        week_dates_for_lvi = _week_dates(end_date)
+        weekly_lvi = compute_weekly_lvi_summary(week_dates_for_lvi)
+        lvi_line = format_weekly_lvi_line(weekly_lvi)
+        if lvi_line:
+            lines.append("")
+            lines.append(lvi_line)
+    except Exception:
+        pass  # LVI is non-critical — never block the weekly summary
 
     # ── Sleep → Focus correlation insight (v2.2) ──────────────────────────────
     # Shows David the empirical relationship between his sleep quality and

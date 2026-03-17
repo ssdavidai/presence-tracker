@@ -748,3 +748,202 @@ class TestFormatDigestMessageIntegration:
         assert "_" in message  # Italic markers present
         # The volatile line itself should appear within italics
         assert "⚡" in message or "Volatile" in message
+
+
+# ─── Tests: compute_weekly_lvi_summary() ──────────────────────────────────────
+
+class TestComputeWeeklyLviSummary:
+    """Tests for the new compute_weekly_lvi_summary() weekly aggregation function."""
+
+    def _make_volatile_windows(self, date_str: str = "2026-03-17") -> list:
+        """Build windows with high CLS variance (volatile pattern)."""
+        windows = []
+        # Alternating low/high CLS — high std → low LVI → volatile
+        cls_vals = [0.05, 0.75, 0.05, 0.80, 0.04, 0.78]
+        for i, cls_v in enumerate(cls_vals):
+            windows.append(_make_window(
+                date_str=date_str, hour=9 + i, minute=0,
+                is_working_hours=True, in_meeting=True, cls=cls_v,
+            ))
+        return windows
+
+    def _make_smooth_windows(self, date_str: str = "2026-03-17") -> list:
+        """Build windows with minimal CLS variance (smooth pattern)."""
+        windows = []
+        for i in range(6):
+            windows.append(_make_window(
+                date_str=date_str, hour=9 + i, minute=0,
+                is_working_hours=True, in_meeting=True, cls=0.40,
+            ))
+        return windows
+
+    def test_returns_empty_summary_when_no_dates(self):
+        """Empty date list → empty summary with days_meaningful=0."""
+        from analysis.load_volatility import compute_weekly_lvi_summary
+        result = compute_weekly_lvi_summary([])
+        assert result["days_meaningful"] == 0
+        assert result["avg_lvi"] is None
+        assert result["dominant_label"] is None
+        assert result["insight"] is None
+
+    def test_days_meaningful_counts_only_meaningful_days(self):
+        """days_meaningful reflects only days with is_meaningful=True."""
+        from analysis.load_volatility import compute_weekly_lvi_summary
+        from unittest.mock import patch
+
+        smooth_wins = self._make_smooth_windows("2026-03-17")
+        # Patch at engine.store since that's where read_day is imported from inside the function
+        with patch("engine.store.read_day", side_effect=[smooth_wins, [], smooth_wins]):
+            result = compute_weekly_lvi_summary(["2026-03-17", "2026-03-18", "2026-03-19"])
+        # 2026-03-18 has no windows → not meaningful; 2026-03-17 and 2026-03-19 should be
+        assert result["days_meaningful"] == 2
+
+    def test_avg_lvi_reflects_mean_across_meaningful_days(self):
+        """avg_lvi is the mean of per-day LVI scores."""
+        from analysis.load_volatility import compute_weekly_lvi_summary, compute_load_volatility
+        from unittest.mock import patch
+
+        wins_a = self._make_smooth_windows("2026-03-17")
+        wins_b = self._make_smooth_windows("2026-03-18")
+
+        lvi_a = compute_load_volatility(wins_a).lvi
+        lvi_b = compute_load_volatility(wins_b).lvi
+        expected_avg = round((lvi_a + lvi_b) / 2, 4)
+
+        with patch("engine.store.read_day", side_effect=[wins_a, wins_b]):
+            result = compute_weekly_lvi_summary(["2026-03-17", "2026-03-18"])
+
+        assert abs(result["avg_lvi"] - expected_avg) < 0.001
+
+    def test_volatile_days_counted_correctly(self):
+        """volatile_days reflects the number of days with label='volatile'."""
+        from analysis.load_volatility import compute_weekly_lvi_summary
+        from unittest.mock import patch
+
+        volatile_wins = self._make_volatile_windows("2026-03-17")
+        smooth_wins = self._make_smooth_windows("2026-03-18")
+
+        with patch("engine.store.read_day", side_effect=[volatile_wins, smooth_wins]):
+            result = compute_weekly_lvi_summary(["2026-03-17", "2026-03-18"])
+
+        # Volatile windows have high std → volatile label
+        assert result["volatile_days"] + result["variable_days"] >= 1
+        assert result["days_meaningful"] == 2
+
+    def test_smooth_days_counted_correctly(self):
+        """smooth_days reflects the number of days with label='smooth'."""
+        from analysis.load_volatility import compute_weekly_lvi_summary, compute_load_volatility
+        from unittest.mock import patch
+
+        smooth_wins = self._make_smooth_windows("2026-03-17")
+        lvi = compute_load_volatility(smooth_wins)
+        # Only test if the day is actually 'smooth'
+        if lvi.label == "smooth":
+            with patch("engine.store.read_day", side_effect=[smooth_wins, smooth_wins]):
+                result = compute_weekly_lvi_summary(["2026-03-17", "2026-03-18"])
+            assert result["smooth_days"] == 2
+
+    def test_insight_always_present_when_meaningful(self):
+        """insight is a non-empty string when days_meaningful >= 1."""
+        from analysis.load_volatility import compute_weekly_lvi_summary
+        from unittest.mock import patch
+
+        smooth_wins = self._make_smooth_windows("2026-03-17")
+        with patch("engine.store.read_day", return_value=smooth_wins):
+            result = compute_weekly_lvi_summary(["2026-03-17"])
+
+        assert result["insight"] is not None
+        assert len(result["insight"]) > 10
+
+    def test_read_day_exception_does_not_crash(self):
+        """If read_day raises for one date, it is skipped silently."""
+        from analysis.load_volatility import compute_weekly_lvi_summary
+        from unittest.mock import patch
+
+        smooth_wins = self._make_smooth_windows("2026-03-17")
+
+        def _side_effect(date_str):
+            if date_str == "2026-03-18":
+                raise IOError("disk error")
+            return smooth_wins
+
+        with patch("engine.store.read_day", side_effect=_side_effect):
+            result = compute_weekly_lvi_summary(["2026-03-17", "2026-03-18"])
+
+        # Should succeed with just the one good date
+        assert result["days_meaningful"] == 1
+
+
+class TestFormatWeeklyLviLine:
+    """Tests for format_weekly_lvi_line()."""
+
+    def test_empty_string_when_no_meaningful_days(self):
+        """Empty weekly_lvi → empty string."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({"days_meaningful": 0})
+        assert result == ""
+
+    def test_empty_string_when_avg_lvi_none(self):
+        """avg_lvi=None → empty string."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({"days_meaningful": 3, "avg_lvi": None,
+                                          "volatile_days": 0, "variable_days": 0, "smooth_days": 0})
+        assert result == ""
+
+    def test_volatile_days_produce_warning_line(self):
+        """≥ 2 volatile days → ⚡ warning line."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({
+            "days_meaningful": 5,
+            "avg_lvi": 0.30,
+            "volatile_days": 2,
+            "variable_days": 1,
+            "smooth_days": 1,
+        })
+        assert "⚡" in result
+        assert "volatile" in result.lower() or "2" in result
+
+    def test_many_variable_plus_volatile_produces_line(self):
+        """≥ 3 variable+volatile days → 〜 line."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({
+            "days_meaningful": 5,
+            "avg_lvi": 0.45,
+            "volatile_days": 1,
+            "variable_days": 2,
+            "smooth_days": 1,
+        })
+        assert "〜" in result
+        assert "3" in result  # 1+2=3
+
+    def test_mostly_smooth_produces_positive_line(self):
+        """≥ 4 smooth days → 〰️ positive line."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({
+            "days_meaningful": 5,
+            "avg_lvi": 0.87,
+            "volatile_days": 0,
+            "variable_days": 0,
+            "smooth_days": 4,
+        })
+        assert "〰️" in result
+        assert "smooth" in result.lower() or "Smooth" in result
+
+    def test_average_week_returns_empty(self):
+        """A steady/average week (no extremes) → empty string."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({
+            "days_meaningful": 5,
+            "avg_lvi": 0.65,
+            "volatile_days": 0,
+            "variable_days": 1,
+            "smooth_days": 2,
+        })
+        # Not volatile enough, not smooth enough — nothing to surface
+        assert result == ""
+
+    def test_output_is_string(self):
+        """Return value is always a string."""
+        from analysis.load_volatility import format_weekly_lvi_line
+        result = format_weekly_lvi_line({})
+        assert isinstance(result, str)

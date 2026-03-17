@@ -352,6 +352,146 @@ def format_lvi_section(lvi: "LoadVolatility") -> str:
     return "\n".join([header, detail])
 
 
+# ─── Weekly aggregation ────────────────────────────────────────────────────────
+
+def compute_weekly_lvi_summary(dates: list[str]) -> dict:
+    """
+    Aggregate Load Volatility Index stats across a list of dates.
+
+    For each date, loads windows from the JSONL store and computes LVI.
+    Returns a weekly summary dict suitable for the weekly Slack report.
+
+    Args:
+        dates: List of date strings (YYYY-MM-DD) to aggregate.
+
+    Returns:
+        dict with:
+          - avg_lvi: float | None              — mean LVI across meaningful days
+          - dominant_label: str | None         — most common LVI label ('smooth' / 'steady' / etc.)
+          - volatile_days: int                 — days with label == 'volatile'
+          - variable_days: int                 — days with label == 'variable'
+          - smooth_days: int                   — days with label == 'smooth'
+          - days_meaningful: int               — days with is_meaningful == True
+          - most_volatile_day: str | None      — date with lowest LVI (most volatile)
+          - most_volatile_lvi: float | None    — that day's LVI score
+          - insight: str | None                — one-line weekly insight
+    """
+    from engine.store import read_day
+
+    lvi_results = []
+    for date_str in dates:
+        try:
+            windows = read_day(date_str)
+            if windows:
+                result = compute_load_volatility(windows)
+                if result.is_meaningful:
+                    lvi_results.append((date_str, result))
+        except Exception:
+            continue  # never crash the weekly aggregation
+
+    if not lvi_results:
+        return {
+            "avg_lvi": None,
+            "dominant_label": None,
+            "volatile_days": 0,
+            "variable_days": 0,
+            "smooth_days": 0,
+            "days_meaningful": 0,
+            "most_volatile_day": None,
+            "most_volatile_lvi": None,
+            "insight": None,
+        }
+
+    # Label counts
+    label_counts: dict[str, int] = {"smooth": 0, "steady": 0, "variable": 0, "volatile": 0}
+    for _d, r in lvi_results:
+        label_counts[r.label] = label_counts.get(r.label, 0) + 1
+
+    avg_lvi = round(sum(r.lvi for _, r in lvi_results) / len(lvi_results), 4)
+
+    # Most common label
+    dominant_label = max(label_counts, key=lambda k: label_counts[k])
+
+    # Most volatile day (lowest LVI)
+    most_volatile = min(lvi_results, key=lambda x: x[1].lvi)
+    most_volatile_day = most_volatile[0] if most_volatile[1].label in ("variable", "volatile") else None
+    most_volatile_lvi = most_volatile[1].lvi if most_volatile_day else None
+
+    # Weekly insight
+    n = len(lvi_results)
+    volatile_n = label_counts.get("volatile", 0)
+    variable_n = label_counts.get("variable", 0)
+    smooth_n = label_counts.get("smooth", 0)
+
+    if volatile_n >= 2:
+        insight = (
+            f"{volatile_n}/{n} days had volatile load patterns "
+            f"(LVI avg {avg_lvi:.2f}) — high cognitive switching cost this week."
+        )
+    elif volatile_n + variable_n >= 3:
+        insight = (
+            f"{volatile_n + variable_n}/{n} days had uneven load distribution "
+            f"— the week lacked sustained rhythm."
+        )
+    elif smooth_n >= 4:
+        insight = (
+            f"{smooth_n}/{n} days had smooth load patterns "
+            f"(LVI avg {avg_lvi:.2f}) — consistently predictable cognitive demand."
+        )
+    else:
+        insight = (
+            f"Load patterns were mostly steady this week "
+            f"(LVI avg {avg_lvi:.2f}, dominant: {dominant_label})."
+        )
+
+    return {
+        "avg_lvi": avg_lvi,
+        "dominant_label": dominant_label,
+        "volatile_days": label_counts.get("volatile", 0),
+        "variable_days": label_counts.get("variable", 0),
+        "smooth_days": label_counts.get("smooth", 0),
+        "days_meaningful": n,
+        "most_volatile_day": most_volatile_day,
+        "most_volatile_lvi": most_volatile_lvi,
+        "insight": insight,
+    }
+
+
+def format_weekly_lvi_line(weekly_lvi: dict) -> str:
+    """
+    Format a compact Slack-ready weekly LVI one-liner.
+
+    Only shows when there's something noteworthy (variable or volatile days
+    present, or the week was notably smooth).
+
+    Example outputs:
+        ⚡ Load rhythm: 2 volatile days this week — high cognitive switching cost
+        〜 Load rhythm: 3 variable/volatile days — uneven demand distribution
+        〰️ Load rhythm: Smooth (LVI avg 0.84) — consistent cognitive demand all week
+    """
+    if not weekly_lvi.get("days_meaningful", 0):
+        return ""
+
+    volatile_n = weekly_lvi.get("volatile_days", 0)
+    variable_n = weekly_lvi.get("variable_days", 0)
+    smooth_n = weekly_lvi.get("smooth_days", 0)
+    avg_lvi = weekly_lvi.get("avg_lvi")
+    n = weekly_lvi.get("days_meaningful", 0)
+
+    if avg_lvi is None:
+        return ""
+
+    if volatile_n >= 2:
+        return f"⚡ Load rhythm: {volatile_n} volatile day{'s' if volatile_n != 1 else ''} this week — high cognitive switching cost"
+    if volatile_n + variable_n >= 3:
+        return f"〜 Load rhythm: {volatile_n + variable_n}/{n} days had uneven load — fragmented demand pattern"
+    if smooth_n >= 4:
+        return f"〰️ Load rhythm: Smooth week (LVI avg {avg_lvi:.2f}) — consistent cognitive demand"
+
+    # Not noteworthy enough to surface
+    return ""
+
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def _run_cli() -> None:

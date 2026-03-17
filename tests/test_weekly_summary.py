@@ -1454,3 +1454,198 @@ class TestFormatWeeklyMessageLoadDrivers:
 
         assert "Weekly Presence Summary" in message
         assert "Load Drivers" not in message
+
+
+# ─── Tests: Weekly Flow State and LVI wiring (v2.5) ──────────────────────────
+
+class TestWeeklyFlowStateSummary:
+    """Tests for flow state weekly summary wiring in format_weekly_message()."""
+
+    # Use a fixed date window where we have a full 7-day window available
+    # Use 2026-03-14 (the common test date in this file) as end_date
+    _END_DATE = "2026-03-14"
+    _DATES = [f"2026-03-{d:02d}" for d in range(8, 15)]  # Mar 8–14
+
+    def _get_rolling(self):
+        return _make_rolling(self._DATES)
+
+    def test_flow_section_shown_when_flow_detected(self):
+        """Flow section appears when compute_weekly_flow_summary returns flow data."""
+        from unittest.mock import patch
+
+        flow_data = {
+            "total_flow_minutes": 90,
+            "avg_flow_minutes_per_day": 18.0,
+            "best_flow_day": self._END_DATE,
+            "best_flow_minutes": 60,
+            "flow_days": 3,
+            "avg_flow_score": 0.5,
+        }
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.flow_detector.compute_weekly_flow_summary", return_value=flow_data):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "🌊" in message
+
+    def test_flow_section_absent_when_no_flow(self):
+        """Flow section is omitted when total_flow_minutes = 0."""
+        from unittest.mock import patch
+
+        flow_data = {
+            "total_flow_minutes": 0,
+            "avg_flow_minutes_per_day": 0.0,
+            "best_flow_day": None,
+            "best_flow_minutes": 0,
+            "flow_days": 0,
+            "avg_flow_score": 0.0,
+        }
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.flow_detector.compute_weekly_flow_summary", return_value=flow_data):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "🌊 Flow:" not in message
+
+    def test_flow_section_absent_when_flow_raises(self):
+        """If flow detector raises, the message still renders without error."""
+        from unittest.mock import patch
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.flow_detector.compute_weekly_flow_summary",
+                   side_effect=RuntimeError("flow exploded")):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "Weekly Presence Summary" in message
+        assert "🌊" not in message
+
+    def test_flow_line_includes_total_hours_and_days(self):
+        """Flow line shows total hours and number of days."""
+        from unittest.mock import patch
+
+        flow_data = {
+            "total_flow_minutes": 120,
+            "avg_flow_minutes_per_day": 24.0,
+            "best_flow_day": self._END_DATE,
+            "best_flow_minutes": 90,
+            "flow_days": 5,
+            "avg_flow_score": 0.7,
+        }
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.flow_detector.compute_weekly_flow_summary", return_value=flow_data):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "5/7" in message
+        assert "2.0h" in message
+
+
+class TestWeeklyLviWiring:
+    """Tests for Load Volatility weekly LVI wiring in format_weekly_message()."""
+
+    _END_DATE = "2026-03-14"
+    _DATES = [f"2026-03-{d:02d}" for d in range(8, 15)]
+
+    def _get_rolling(self):
+        return _make_rolling(self._DATES)
+
+    def test_lvi_section_shown_when_volatile_week(self):
+        """LVI warning shown when format_weekly_lvi_line returns non-empty string."""
+        from unittest.mock import patch
+
+        lvi_data = {
+            "days_meaningful": 5,
+            "avg_lvi": 0.28,
+            "volatile_days": 3,
+            "variable_days": 1,
+            "smooth_days": 0,
+            "most_volatile_day": self._END_DATE,
+            "most_volatile_lvi": 0.15,
+            "insight": "3/5 days had volatile patterns",
+        }
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.load_volatility.compute_weekly_lvi_summary", return_value=lvi_data):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "⚡" in message
+
+    def test_lvi_section_absent_when_average_week(self):
+        """LVI section is omitted when the week is unremarkably average."""
+        from unittest.mock import patch
+
+        lvi_data = {
+            "days_meaningful": 5,
+            "avg_lvi": 0.65,
+            "volatile_days": 0,
+            "variable_days": 1,
+            "smooth_days": 2,
+            "most_volatile_day": None,
+            "most_volatile_lvi": None,
+            "insight": "Steady week",
+        }
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.load_volatility.compute_weekly_lvi_summary", return_value=lvi_data):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "⚡ Load rhythm" not in message
+        assert "〰️ Load rhythm" not in message
+        assert "〜 Load rhythm" not in message
+
+    def test_lvi_section_absent_when_lvi_raises(self):
+        """If LVI aggregation raises, the message still renders without error."""
+        from unittest.mock import patch
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.load_volatility.compute_weekly_lvi_summary",
+                   side_effect=RuntimeError("lvi exploded")):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "Weekly Presence Summary" in message
+        assert "⚡ Load rhythm" not in message
+
+    def test_smooth_week_shows_positive_lvi_line(self):
+        """4+ smooth days → 〰️ positive LVI line appears."""
+        from unittest.mock import patch
+
+        lvi_data = {
+            "days_meaningful": 5,
+            "avg_lvi": 0.88,
+            "volatile_days": 0,
+            "variable_days": 0,
+            "smooth_days": 5,
+            "most_volatile_day": None,
+            "most_volatile_lvi": None,
+            "insight": "5/5 smooth days",
+        }
+
+        with patch("scripts.weekly_summary.read_summary", return_value=self._get_rolling()), \
+             patch("scripts.weekly_summary.read_day", return_value=[]), \
+             patch("analysis.load_volatility.compute_weekly_lvi_summary", return_value=lvi_data):
+            from scripts.weekly_summary import compute_weekly_summary, format_weekly_message
+            summary = compute_weekly_summary(self._END_DATE)
+            message = format_weekly_message(summary)
+
+        assert "〰️" in message
